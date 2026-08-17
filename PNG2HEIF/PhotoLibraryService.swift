@@ -5,6 +5,53 @@ import UniformTypeIdentifiers
 import UIKit
 import Combine
 
+// MARK: - Export Mode
+
+enum ExportMode: Int, CaseIterable, Identifiable {
+    case library = 0   // 直接存到照片图库（最近项目）
+    case album = 1     // 存到已有相簿
+    case newAlbum = 2  // 新建相簿并存入
+    case folder = 3    // 导出到文件夹（Files）
+
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .library:  return "照片图库"
+        case .album:    return "指定相簿"
+        case .newAlbum: return "新建相簿"
+        case .folder:   return "文件夹"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .library:  return "photo.on.rectangle.angled"
+        case .album:    return "rectangle.stack"
+        case .newAlbum: return "rectangle.stack.badge.plus"
+        case .folder:   return "folder"
+        }
+    }
+}
+
+// MARK: - Album Model
+
+struct AlbumItem: Identifiable, Hashable {
+    let id: String       // localIdentifier
+    let title: String
+    let count: Int
+    var assetCollection: PHAssetCollection?
+
+    init(_ collection: PHAssetCollection) {
+        self.id = collection.localIdentifier
+        self.title = collection.localizedTitle ?? "未命名相簿"
+        self.count = collection.estimatedAssetCount
+        self.assetCollection = collection
+    }
+}
+
+// MARK: - PhotoLibraryService
+
 final class PhotoLibraryService: ObservableObject {
     // MARK: - Published State
 
@@ -22,12 +69,19 @@ final class PhotoLibraryService: ObservableObject {
     @Published var compressionQuality: Float = 0.82
     @Published var alert: AlertItem?
 
+    // 导出位置
+    @Published var exportMode: ExportMode = .library
+    @Published var userAlbums: [AlbumItem] = []
+    @Published var selectedAlbumID: String?
+    @Published var newAlbumName: String = "HEIF截图"
+    @Published var exportFolderURL: URL?
+    @Published var exportFolderName: String?
+
     // MARK: - Private
 
     private var assets: [PHAsset] = []
     private var shouldStop = false
     private let workerQueue = DispatchQueue(label: "PNG2HEIF.worker", qos: .userInitiated)
-    /// 样本转换得到的压缩比（HEIF 大小 / PNG 大小），用于估算总体积
     private var sampleRatio: Float = 0.15
 
     // MARK: - Computed
@@ -43,6 +97,31 @@ final class PhotoLibraryService: ObservableObject {
     var savedSizeText: String {
         let saved = pngSize - estimatedHEIFSize
         return ByteCountFormatter.string(fromByteCount: max(saved, 0), countStyle: .file)
+    }
+
+    var selectedAlbumTitle: String? {
+        guard let id = selectedAlbumID else { return nil }
+        return userAlbums.first(where: { $0.id == id })?.title
+    }
+
+    // MARK: - Album Management
+
+    /// 加载用户相簿列表（在 scan 时自动调用）
+    func loadAlbums() {
+        let fetch = PHAssetCollection.fetchAssetCollections(
+            with: .album,
+            subtype: .albumUserCreated,
+            options: nil
+        )
+        var albums: [AlbumItem] = []
+        fetch.enumerateObjects { collection, _, _ in
+            albums.append(AlbumItem(collection))
+        }
+        // 按名称排序
+        albums.sort { $0.title.localizedCompare($1.title) == .orderedAscending }
+        DispatchQueue.main.async { [weak self] in
+            self?.userAlbums = albums
+        }
     }
 
     // MARK: - Authorization & Scan
@@ -81,7 +160,6 @@ final class PhotoLibraryService: ObservableObject {
             fetchOptions.sortDescriptors = [
                 NSSortDescriptor(key: "creationDate", ascending: true)
             ]
-
             let result = PHAsset.fetchAssets(with: .image, options: fetchOptions)
 
             var found: [PHAsset] = []
@@ -92,13 +170,12 @@ final class PhotoLibraryService: ObservableObject {
                 found.append(asset)
             }
 
-            // 在后台线程计算总大小（需要读取每个 asset 的 resource fileSize）
             for asset in found {
                 totalSize += self.estimatedPNGSize(asset: asset)
             }
 
-            // 样本转换：取中间那张做一次实际编码，得到真实压缩比
             let ratio = self.computeSampleRatio(assets: found)
+            self.loadAlbums()
 
             DispatchQueue.main.async {
                 self.assets = found
@@ -119,7 +196,28 @@ final class PhotoLibraryService: ObservableObject {
     func startConversion() {
         guard !isWorking, !assets.isEmpty else { return }
 
+        // 文件夹模式需要先选择目录
+        if exportMode == .folder, exportFolderURL == nil {
+            status = "请先选择导出文件夹"
+            return
+        }
+        // 相簿模式需要选择相簿
+        if exportMode == .album, selectedAlbumID == nil {
+            status = "请先选择一个相簿"
+            return
+        }
+        // 新建相簿模式需要填写名称
+        if exportMode == .newAlbum, newAlbumName.trimmingCharacters(in: .whitespaces).isEmpty {
+            status = "请输入新相簿名称"
+            return
+        }
+
         let work = assets
+        let mode = exportMode
+        let albumID = selectedAlbumID
+        let albumName = newAlbumName.trimmingCharacters(in: .whitespaces)
+        let folderURL = exportFolderURL
+
         isWorking = true
         shouldStop = false
         processed = 0
@@ -127,47 +225,25 @@ final class PhotoLibraryService: ObservableObject {
         progress = 0
         status = "开始转换…"
 
-        workerQueue.async { [weak self] in
-            guard let self = self else { return }
-
-            self.ensureAlbum(named: "HEIF截图") { album in
-                guard let album = album else {
-                    self.finish(message: "无法创建或访问 HEIF截图 相簿")
-                    return
-                }
-
-                var successCount = 0
-                var failCount = 0
-
-                for asset in work {
-                    if self.shouldStop { break }
-
-                    autoreleasepool {
-                        let ok = self.convertOne(asset: asset, to: album)
-                        if ok {
-                            successCount += 1
-                        } else {
-                            failCount += 1
-                        }
-
-                        DispatchQueue.main.async {
-                            self.processed += 1
-                            self.progress = Double(self.processed) / Double(max(self.total, 1))
-                            let pct = Int(self.progress * 100)
-                            self.status = "已转换 \(self.processed) / \(self.total)（\(pct)%）"
-                        }
+        if mode == .folder {
+            // 文件夹导出：不需要 Photos 写入权限，直接写文件
+            workerQueue.async { [weak self] in
+                guard let self = self, let dir = folderURL else { return }
+                self.convertToFolder(assets: work, dir: dir)
+            }
+        } else {
+            // Photos 导出：需要相簿
+            workerQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.resolveAlbum(mode: mode, albumID: albumID, albumName: albumName) { album in
+                    if mode == .library {
+                        // 直接存图库，不需要相簿
+                        self.runConversion(assets: work, album: nil)
+                    } else if let album = album {
+                        self.runConversion(assets: work, album: album)
+                    } else {
+                        self.finish(message: "无法创建或访问相簿")
                     }
-                }
-
-                if self.shouldStop {
-                    let skipped = work.count - successCount - failCount
-                    self.finish(
-                        message: "已停止：成功 \(successCount) 张，失败 \(failCount) 张，跳过 \(skipped) 张。"
-                    )
-                } else {
-                    self.finish(
-                        message: "完成：成功 \(successCount) 张，失败 \(failCount) 张。"
-                    )
                 }
             }
         }
@@ -177,6 +253,102 @@ final class PhotoLibraryService: ObservableObject {
         shouldStop = true
         DispatchQueue.main.async { [weak self] in
             self?.status = "正在停止…"
+        }
+    }
+
+    // MARK: - Private: Resolve Album
+
+    /// 根据导出模式获取目标相簿
+    private func resolveAlbum(mode: ExportMode, albumID: String?, albumName: String,
+                              completion: @escaping (PHAssetCollection?) -> Void) {
+        switch mode {
+        case .library:
+            completion(nil)
+            return
+
+        case .album:
+            if let id = albumID {
+                let result = PHAssetCollection.fetchAssetCollections(
+                    withLocalIdentifiers: [id], options: nil
+                )
+                completion(result.firstObject)
+            } else {
+                completion(nil)
+            }
+            return
+
+        case .newAlbum:
+            ensureAlbum(named: albumName, completion: completion)
+            return
+
+        case .folder:
+            completion(nil)
+            return
+        }
+    }
+
+    // MARK: - Private: Run Conversion (Photos Mode)
+
+    private func runConversion(assets work: [PHAsset], album: PHAssetCollection?) {
+        var successCount = 0
+        var failCount = 0
+
+        for asset in work {
+            if self.shouldStop { break }
+
+            autoreleasepool {
+                let ok = self.convertOneToPhotos(asset: asset, album: album)
+                if ok { successCount += 1 } else { failCount += 1 }
+
+                DispatchQueue.main.async {
+                    self.processed += 1
+                    self.progress = Double(self.processed) / Double(max(self.total, 1))
+                    let pct = Int(self.progress * 100)
+                    self.status = "已转换 \(self.processed) / \(self.total)（\(pct)%）"
+                }
+            }
+        }
+
+        if self.shouldStop {
+            let skipped = work.count - successCount - failCount
+            self.finish(message: "已停止：成功 \(successCount) 张，失败 \(failCount) 张，跳过 \(skipped) 张。")
+        } else {
+            self.finish(message: "完成：成功 \(successCount) 张，失败 \(failCount) 张。")
+        }
+    }
+
+    // MARK: - Private: Folder Export
+
+    private func convertToFolder(assets work: [PHAsset], dir: URL) {
+        var successCount = 0
+        var failCount = 0
+
+        // 确保目录可写
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+
+        for asset in work {
+            if self.shouldStop { break }
+
+            autoreleasepool {
+                let ok = self.convertOneToFolder(asset: asset, dir: dir)
+                if ok { successCount += 1 } else { failCount += 1 }
+
+                DispatchQueue.main.async {
+                    self.processed += 1
+                    self.progress = Double(self.processed) / Double(max(self.total, 1))
+                    let pct = Int(self.progress * 100)
+                    self.status = "已导出 \(self.processed) / \(self.total)（\(pct)%）"
+                }
+            }
+        }
+
+        if self.shouldStop {
+            let skipped = work.count - successCount - failCount
+            self.finish(message: "已停止：导出 \(successCount) 张，失败 \(failCount) 张，跳过 \(skipped) 张。")
+        } else {
+            self.finish(message: "导出完成：成功 \(successCount) 张，失败 \(failCount) 张。保存至 \(dir.lastPathComponent)")
         }
     }
 
@@ -196,10 +368,11 @@ final class PhotoLibraryService: ObservableObject {
         return Int64(resources.first?.value(forKey: "fileSize") as? Int64 ?? 0)
     }
 
-    /// 取一张有代表性的样本做实际 PNG→HEIF 编码，返回压缩比
+    // MARK: - Private: Sample Ratio
+
     private func computeSampleRatio(assets: [PHAsset]) -> Float {
-        // 优先取中间位置的图（避免第一张太小或最后一张太特殊）
-        let index = min(max(assets.count / 2, 0), assets.count - 1)
+        let index = Swift.min(Swift.max(assets.count / 2, 0), assets.count - 1)
+        guard !assets.isEmpty else { return 0.15 }
         let sampleAsset = assets[index]
 
         let resource = PHAssetResource.assetResources(for: sampleAsset).first(where: {
@@ -228,27 +401,19 @@ final class PhotoLibraryService: ObservableObject {
                 try? FileManager.default.removeItem(at: inputURL)
                 try? FileManager.default.removeItem(at: outputURL)
             }
-
             guard let source = CGImageSourceCreateWithURL(inputURL as CFURL, nil),
                   let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                 semaphore.signal()
                 return
             }
-
             let quality = self.compressionQuality
-
             guard let dest = CGImageDestinationCreateWithURL(
-                outputURL as CFURL,
-                UTType.heic.identifier as CFString,
-                1, nil
+                outputURL as CFURL, UTType.heic.identifier as CFString, 1, nil
             ) else {
                 semaphore.signal()
                 return
             }
-
-            let props: [CFString: Any] = [
-                kCGImageDestinationLossyCompressionQuality: quality
-            ]
+            let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
             CGImageDestinationAddImage(dest, cgImage, props as CFDictionary)
             CGImageDestinationFinalize(dest)
 
@@ -259,48 +424,42 @@ final class PhotoLibraryService: ObservableObject {
             semaphore.signal()
         }
 
-        semaphore.wait(timeout: .now() + 30)
+        _ = semaphore.wait(timeout: .now() + 30)
         let ratio = Float(heifSize) / Float(pngSize)
-        // 限制在合理范围
         return clampFloat(ratio, 0.01...1.0)
     }
 
-    // MARK: - Private: Single Asset Conversion
+    // MARK: - Private: Encode HEIF (shared)
 
-    private func convertOne(asset: PHAsset, to album: PHAssetCollection) -> Bool {
-        let semaphore = DispatchSemaphore(value: 0)
-        var convertSuccess = false
-
+    /// 导出 PNG → 编码 HEIF，返回临时 HEIF 文件 URL。失败返回 nil。
+    private func encodeHEIF(from asset: PHAsset) -> URL? {
         let resources = PHAssetResource.assetResources(for: asset)
         guard let resource = resources.first(where: {
             let uti = $0.uniformTypeIdentifier.lowercased()
             return uti == "public.png" || uti.contains("png") || $0.originalFilename.lowercased().hasSuffix(".png")
-        }) else {
-            return false
-        }
+        }) else { return nil }
 
         let inputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".png")
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".heic")
 
-        defer {
-            try? FileManager.default.removeItem(at: inputURL)
-            try? FileManager.default.removeItem(at: outputURL)
-        }
+        let exportOpts = PHAssetResourceRequestOptions()
+        exportOpts.isNetworkAccessAllowed = true
 
-        // ✅ 关键修复：允许从 iCloud 下载
-        let exportOptions = PHAssetResourceRequestOptions()
-        exportOptions.isNetworkAccessAllowed = true
+        let semaphore = DispatchSemaphore(value: 0)
+        var encodeOK = false
 
-        PHAssetResourceManager.default().writeData(for: resource, toFile: inputURL, options: exportOptions) { [weak self] error in
+        PHAssetResourceManager.default().writeData(for: resource, toFile: inputURL, options: exportOpts) { [weak self] error in
+            defer {
+                try? FileManager.default.removeItem(at: inputURL)
+            }
             if let error = error {
                 print("[PNG2HEIF] writeData 失败: \(error.localizedDescription)")
                 semaphore.signal()
                 return
             }
 
-            // ---- 读取原始图片 ----
             guard let source = CGImageSourceCreateWithURL(inputURL as CFURL, nil),
                   let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                 print("[PNG2HEIF] 解码 PNG 失败")
@@ -308,42 +467,36 @@ final class PhotoLibraryService: ObservableObject {
                 return
             }
 
-            // ---- 提取原始元数据 ----
             var metadata = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
 
-            // ---- 编码 HEIF ----
             guard let destination = CGImageDestinationCreateWithURL(
-                outputURL as CFURL,
-                UTType.heic.identifier as CFString,
-                1, nil
+                outputURL as CFURL, UTType.heic.identifier as CFString, 1, nil
             ) else {
                 print("[PNG2HEIF] 创建 HEIC destination 失败")
                 semaphore.signal()
                 return
             }
 
-            // ✅ 质量控制：默认 0.82，与 iOS 快捷指令的输出体积接近
-            //    截图以文字/线条为主，0.82 几乎无损但体积远小于 1.0
             metadata[kCGImageDestinationLossyCompressionQuality] = self?.compressionQuality ?? 0.82
 
-            // ✅✅ 关键修复：将原始日期写入 HEIF 文件的 EXIF 元数据
-            //    仅设 request.creationDate 不够——Photos 导入文件时会读取文件内嵌的
-            //    EXIF DateTimeOriginal，如果缺失就用「当前时间」，导致出现在最新位置。
-            //    必须在编码前把日期写进文件本身。
+            // 写入 EXIF 日期
             if self?.keepCreationDate == true, let originalDate = asset.creationDate {
-                let exifFormatter = DateFormatter()
-                exifFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-                let dateString = exifFormatter.string(from: originalDate)
+                let fmt = DateFormatter()
+                fmt.dateFormat = "yyyy:MM:dd HH:mm:ss"
+                let ds = fmt.string(from: originalDate)
 
                 var exif = (metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
-                exif[kCGImagePropertyExifDateTimeOriginal] = dateString
-                exif[kCGImagePropertyExifDateTimeDigitized] = dateString
+                exif[kCGImagePropertyExifDateTimeOriginal] = ds
+                exif[kCGImagePropertyExifDateTimeDigitized] = ds
                 metadata[kCGImagePropertyExifDictionary] = exif
 
-                // 也写入 TIFF 字典（部分读取器会从这里取日期）
                 var tiff = (metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
-                tiff[kCGImagePropertyTIFFDateTime] = dateString
+                tiff[kCGImagePropertyTIFFDateTime] = ds
                 metadata[kCGImagePropertyTIFFDictionary] = tiff
+
+                try? FileManager.default.setAttributes([
+                    .creationDate: originalDate, .modificationDate: originalDate
+                ], ofItemAtPath: outputURL.path)
             }
 
             CGImageDestinationAddImage(destination, cgImage, metadata as CFDictionary)
@@ -354,87 +507,129 @@ final class PhotoLibraryService: ObservableObject {
                 return
             }
 
-            // ✅✅ 三重保险：给文件本身也打上正确的时间戳
-            //    Photos 导入时可能会读取文件系统时间作为 fallback
-            if self?.keepCreationDate == true, let originalDate = asset.creationDate {
-                try? FileManager.default.setAttributes([
-                    .creationDate: originalDate,
-                    .modificationDate: originalDate
-                ], ofItemAtPath: outputURL.path)
+            encodeOK = true
+            semaphore.signal()
+        }
+
+        _ = semaphore.wait(timeout: .now() + 120)
+
+        if encodeOK {
+            return outputURL
+        } else {
+            try? FileManager.default.removeItem(at: outputURL)
+            return nil
+        }
+    }
+
+    // MARK: - Private: Convert One → Photos
+
+    private func convertOneToPhotos(asset: PHAsset, album: PHAssetCollection?) -> Bool {
+        guard let heifURL = encodeHEIF(from: asset) else { return false }
+
+        defer {
+            try? FileManager.default.removeItem(at: heifURL)
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var convertSuccess = false
+
+        let originalDate = asset.creationDate
+        let shouldKeepDate = self.keepCreationDate
+        let loc = asset.location
+        let fav = asset.isFavorite
+        let shouldDelete = self.deleteOriginals
+        let heifData = try? Data(contentsOf: heifURL)
+
+        guard let heifData = heifData else {
+            print("[PNG2HEIF] 读取 HEIF Data 失败")
+            return false
+        }
+
+        PHPhotoLibrary.shared().performChanges({
+            let req = PHAssetCreationRequest.forAsset()
+
+            if shouldKeepDate, let date = originalDate {
+                req.creationDate = date
             }
+            if let loc = loc { req.location = loc }
+            req.isFavorite = fav
 
-            // ---- 写入照片库 ----
-            // ✅✅ 关键改动：用 PHAssetCreationRequest 替代 creationRequestForAssetFromImage
-            //    后者创建的资产，Photos 内部会忽略 request.creationDate，
-            //    改用导入时间或文件系统时间作为「最近项目」排序依据。
-            //    PHAssetCreationRequest.forAsset() 对 creationDate 的控制更直接。
-            let originalDate = asset.creationDate
-            let shouldKeepDate = self?.keepCreationDate ?? true
-            let loc = asset.location
-            let fav = asset.isFavorite
-            let shouldDelete = self?.deleteOriginals ?? false
-            let heifData = try? Data(contentsOf: outputURL)
+            req.addResource(with: .photo, data: heifData, options: nil)
 
-            guard let heifData = heifData else {
-                print("[PNG2HEIF] 读取 HEIF Data 失败")
-                semaphore.signal()
-                return
-            }
-
-            PHPhotoLibrary.shared().performChanges({
-                let creationRequest = PHAssetCreationRequest.forAsset()
-
-                // ① 设置 creationDate
-                if shouldKeepDate, let date = originalDate {
-                    creationRequest.creationDate = date
-                }
-                // 保留位置
-                if let loc = loc {
-                    creationRequest.location = loc
-                }
-                // 保留收藏
-                creationRequest.isFavorite = fav
-
-                // ② 以 resource 方式写入文件数据（而非 fromFileURL）
-                creationRequest.addResource(with: .photo, data: heifData, options: nil)
-
-                // 加入相簿
-                let placeholder = creationRequest.placeholderForCreatedAsset
+            if let album = album {
+                let placeholder = req.placeholderForCreatedAsset
                 if let placeholder = placeholder {
                     let albumChange = PHAssetCollectionChangeRequest(for: album)
                     albumChange?.addAssets([placeholder] as NSArray)
                 }
-            }) { [weak self] changed, error in
-                if changed && error == nil {
-                    convertSuccess = true
+            }
+        }) { [weak self] changed, error in
+            if changed && error == nil {
+                convertSuccess = true
 
-                    if shouldDelete {
-                        PHPhotoLibrary.shared().performChanges({
-                            PHAssetChangeRequest.deleteAssets([asset] as NSArray)
-                        }) { deleted, _ in
-                            convertSuccess = convertSuccess && deleted
-                            semaphore.signal()
-                        }
-                    } else {
+                if shouldDelete {
+                    PHPhotoLibrary.shared().performChanges({
+                        PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+                    }) { deleted, _ in
+                        convertSuccess = convertSuccess && deleted
                         semaphore.signal()
                     }
                 } else {
-                    if let error = error {
-                        print("[PNG2HEIF] 导入照片库失败: \(error.localizedDescription)")
-                    }
                     semaphore.signal()
                 }
+            } else {
+                if let error = error {
+                    print("[PNG2HEIF] 导入照片库失败: \(error.localizedDescription)")
+                }
+                semaphore.signal()
             }
         }
 
-        // ✅ 超时保护：防止任何异常导致线程永久阻塞
-        let timeoutResult = semaphore.wait(timeout: .now() + 120)
-        if timeoutResult == .timedOut {
-            print("[PNG2HEIF] 单张转换超时，跳过")
+        _ = semaphore.wait(timeout: .now() + 120)
+        return convertSuccess
+    }
+
+    // MARK: - Private: Convert One → Folder
+
+    private func convertOneToFolder(asset: PHAsset, dir: URL) -> Bool {
+        guard let heifURL = encodeHEIF(from: asset) else { return false }
+
+        defer {
+            try? FileManager.default.removeItem(at: heifURL)
+        }
+
+        // 用原始文件名（改扩展名）或 asset 本地 ID
+        let resources = PHAssetResource.assetResources(for: asset)
+        let originalName = resources.first?.originalFilename ?? ""
+        let baseName = (originalName as NSString).deletingPathExtension
+        let safeName = baseName.isEmpty ? UUID().uuidString : baseName
+        let destURL = dir.appendingPathComponent(safeName + ".heic")
+
+        // 避免文件名重复
+        let finalURL = FileManager.default.uniqueFileName(for: destURL)
+
+        do {
+            try FileManager.default.copyItem(at: heifURL, to: finalURL)
+        } catch {
+            print("[PNG2HEIF] 复制到文件夹失败: \(error.localizedDescription)")
             return false
         }
 
-        return convertSuccess
+        // 如果需要删除原图
+        if self.deleteOriginals {
+            let semaphore = DispatchSemaphore(value: 0)
+            var deleted = false
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+            }) { ok, _ in
+                deleted = ok
+                semaphore.signal()
+            }
+            _ = semaphore.wait(timeout: .now() + 30)
+            return deleted
+        }
+
+        return true
     }
 
     // MARK: - Private: Album
@@ -444,9 +639,7 @@ final class PhotoLibraryService: ObservableObject {
         options.predicate = NSPredicate(format: "localizedTitle == %@", name)
 
         let fetch = PHAssetCollection.fetchAssetCollections(
-            with: .album,
-            subtype: .albumRegular,
-            options: options
+            with: .album, subtype: .albumRegular, options: options
         )
 
         if let found = fetch.firstObject {
@@ -458,14 +651,13 @@ final class PhotoLibraryService: ObservableObject {
         PHPhotoLibrary.shared().performChanges({
             let request = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: name)
             placeholder = request.placeholderForCreatedAssetCollection
-        }) { [weak self] success, _ in
+        }) { success, _ in
             guard success, let id = placeholder?.localIdentifier else {
                 completion(nil)
                 return
             }
             let result = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [id], options: nil)
             completion(result.firstObject)
-            self?.status = "已准备 HEIF截图 相簿"
         }
     }
 
@@ -483,8 +675,24 @@ final class PhotoLibraryService: ObservableObject {
     }
 }
 
-// MARK: - Float Clamp Extension
+// MARK: - Helpers
 
 private func clampFloat(_ value: Float, _ range: ClosedRange<Float>) -> Float {
     return Swift.min(Swift.max(value, range.lowerBound), range.upperBound)
+}
+
+extension FileManager {
+    /// 如果文件已存在，自动加序号避免覆盖：photo.heic → photo 2.heic
+    func uniqueFileName(for url: URL) -> URL {
+        if !fileExists(atPath: url.path) { return url }
+        let ext = url.pathExtension
+        let name = url.deletingPathExtension().lastPathComponent
+        var counter = 1
+        while true {
+            let newName = "\(name) \(counter)"
+            let newURL = url.deletingLastPathComponent().appendingPathComponent(newName).appendingPathExtension(ext)
+            if !fileExists(atPath: newURL.path) { return newURL }
+            counter += 1
+        }
+    }
 }

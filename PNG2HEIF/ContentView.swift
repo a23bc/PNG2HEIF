@@ -1,8 +1,48 @@
 import SwiftUI
 import Photos
+import UniformTypeIdentifiers
+
+// MARK: - Folder Picker (UIDocumentPicker → SwiftUI)
+
+struct FolderPicker: UIViewControllerRepresentable {
+    let onPick: (URL) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forExporting: [], asCopy: true)
+        // 让用户选择文件夹
+        picker.allowsMultipleSelection = false
+        picker.shouldShowFileExtensions = true
+        picker.delegate = context.coordinator
+        // 请求访问权限
+        picker.accessibilityElementsHidden = false
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+    class Coordinator: NSObject, UIDocumentPickerDelegate, UINavigationControllerDelegate {
+        let onPick: (URL) -> Void
+        init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard let url = urls.first else { return }
+            // 用户选的是文件夹，获取 security-scoped 权限
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            onPick(url)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {}
+    }
+}
+
+// MARK: - ContentView
 
 struct ContentView: View {
     @StateObject private var service = PhotoLibraryService()
+    @State private var showFolderPicker = false
 
     var body: some View {
         NavigationView {
@@ -15,14 +55,12 @@ struct ContentView: View {
                         Text("\(service.pngCount) 张")
                             .foregroundColor(.secondary)
                     }
-
                     HStack {
                         Text("原始占用")
                         Spacer()
                         Text(service.pngSizeText)
                             .foregroundColor(.secondary)
                     }
-
                     if service.pngCount > 0 {
                         HStack {
                             Text("预计转换后")
@@ -30,7 +68,6 @@ struct ContentView: View {
                             Text("~\(service.estimatedSizeText)")
                                 .foregroundColor(.secondary)
                         }
-
                         HStack {
                             Text("预计节省")
                             Spacer()
@@ -40,6 +77,96 @@ struct ContentView: View {
                     }
                 } header: {
                     Text("照片图库")
+                }
+
+                // MARK: - 导出位置
+                Section {
+                    Picker("导出到", selection: $service.exportMode) {
+                        ForEach(ExportMode.allCases) { mode in
+                            Label(mode.label, systemImage: mode.icon).tag(mode)
+                        }
+                    }
+                    .onChange(of: service.exportMode) { _ in
+                        // 切换模式时重置文件夹选择
+                        if service.exportMode != .folder {
+                            service.exportFolderURL = nil
+                            service.exportFolderName = nil
+                        }
+                    }
+
+                    // 指定相簿 → 显示相簿列表
+                    if service.exportMode == .album {
+                        if service.userAlbums.isEmpty {
+                            Text("没有用户相簿")
+                                .foregroundColor(.secondary)
+                                .font(.subheadline)
+                        } else {
+                            Picker("选择相簿", selection: $service.selectedAlbumID) {
+                                Text("请选择").tag(String?.none)
+                                ForEach(service.userAlbums) { album in
+                                    HStack {
+                                        Text(album.title)
+                                        Spacer()
+                                        Text("\(album.count) 张")
+                                            .foregroundColor(.secondary)
+                                            Text(Image(systemName: "chevron.right"))
+                                                .foregroundColor(.secondary)
+                                    }
+                                    .tag(Optional(album.id))
+                                }
+                            }
+                        }
+                    }
+
+                    // 新建相簿 → 输入名称
+                    if service.exportMode == .newAlbum {
+                        HStack {
+                            TextField("相簿名称", text: $service.newAlbumName)
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                        }
+                    }
+
+                    // 文件夹 → 选择按钮
+                    if service.exportMode == .folder {
+                        Button {
+                            showFolderPicker = true
+                        } label: {
+                            HStack {
+                                Label("选择文件夹", systemImage: "folder.badge.plus")
+                                Spacer()
+                                if let name = service.exportFolderName {
+                                    Text(name)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                    Text(Image(systemName: "chevron.right"))
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    Text("未选择")
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+
+                        if let name = service.exportFolderName {
+                            Text("HEIF 文件将保存到：\(name)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("导出位置")
+                } footer: {
+                    switch service.exportMode {
+                    case .library:
+                        Text("直接保存到照片图库，不放入任何相簿")
+                    case .album:
+                        Text("保存到已有相簿中")
+                    case .newAlbum:
+                        Text("自动创建新相簿并保存")
+                    case .folder:
+                        Text("导出为 HEIF 文件到「文件」App 中的指定文件夹，不经过照片图库")
+                    }
                 }
 
                 // MARK: - 转换选项
@@ -76,7 +203,6 @@ struct ContentView: View {
 
                 // MARK: - 操作按钮
                 Section {
-                    // 扫描按钮（始终可用）
                     Button {
                         service.scan()
                     } label: {
@@ -85,7 +211,6 @@ struct ContentView: View {
                     }
                     .disabled(service.isWorking)
 
-                    // 开始 / 停止按钮
                     if !service.isWorking {
                         Button {
                             service.startConversion()
@@ -112,7 +237,6 @@ struct ContentView: View {
                         VStack(spacing: 8) {
                             ProgressView(value: service.progress)
                                 .tint(.blue)
-
                             HStack {
                                 Text("\(service.processed) / \(service.total)")
                                     .font(.subheadline)
@@ -150,6 +274,14 @@ struct ContentView: View {
                     message: Text(item.message),
                     dismissButton: .default(Text("好"))
                 )
+            }
+            .sheet(isPresented: $showFolderPicker) {
+                FolderPicker { url in
+                    service.exportFolderURL = url
+                    service.exportFolderName = url.lastPathComponent
+                    // 持久化访问权限
+                    url.startAccessingSecurityScopedResource()
+                }
             }
         }
         .navigationViewStyle(.stack)
