@@ -8,11 +8,10 @@ struct FolderPicker: UIViewControllerRepresentable {
     let onPick: (URL) -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forExporting: [], asCopy: true)
+        // asCopy: false — 我们要拿到真实目录路径，不要副本
+        let picker = UIDocumentPickerViewController(forExporting: [], asCopy: false)
         picker.allowsMultipleSelection = false
-        picker.shouldShowFileExtensions = true
         picker.delegate = context.coordinator
-        picker.accessibilityElementsHidden = false
         return picker
     }
 
@@ -26,8 +25,8 @@ struct FolderPicker: UIViewControllerRepresentable {
 
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
             guard let url = urls.first else { return }
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            // 持有 security-scoped 权限，交给调用方管理生命周期
+            _ = url.startAccessingSecurityScopedResource()
             onPick(url)
         }
 
@@ -41,6 +40,13 @@ struct ContentView: View {
     @StateObject private var service = PhotoLibraryService()
     @State private var showFolderPicker = false
     @State private var showClearConfirm = false
+
+    private func hideKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil, from: nil, for: nil
+        )
+    }
 
     var body: some View {
         NavigationView {
@@ -139,11 +145,16 @@ struct ContentView: View {
                     }
 
                     if service.exportMode == .newAlbum {
-                        HStack {
-                            TextField("相簿名称", text: $service.newAlbumName)
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
-                        }
+                        TextField("相簿名称", text: $service.newAlbumName)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                            .onSubmit { hideKeyboard() }
+                            .toolbar {
+                                ToolbarItemGroup(placement: .keyboard) {
+                                    Spacer()
+                                    Button("完成") { hideKeyboard() }
+                                }
+                            }
                     }
 
                     if service.exportMode == .folder {
@@ -334,7 +345,7 @@ struct ContentView: View {
                 FolderPicker { url in
                     service.exportFolderURL = url
                     service.exportFolderName = url.lastPathComponent
-                    url.startAccessingSecurityScopedResource()
+                    // security-scoped 权限已在 Coordinator 中启动，此处不再重复调用
                 }
             }
         }
