@@ -22,7 +22,10 @@ struct ContentView: View {
 
                 Section("选项") {
                     Toggle("转换成功后删除 PNG", isOn: $service.deleteOriginals)
+                        .disabled(service.isWorking)
+
                     Toggle("只处理 PNG", isOn: $service.onlyPNG)
+                        .disabled(service.isWorking)
                 }
 
                 Section {
@@ -33,19 +36,35 @@ struct ContentView: View {
                     }
                     .disabled(service.isWorking)
 
-                    Button {
-                        service.startConversion()
-                    } label: {
-                        Label("开始转换", systemImage: "arrow.triangle.2.circlepath")
+                    if service.isWorking {
+                        Button(role: .destructive) {
+                            service.stop()
+                        } label: {
+                            Label("停止转换", systemImage: "stop.circle")
+                        }
+                    } else {
+                        Button {
+                            service.startConversion()
+                        } label: {
+                            Label("开始转换", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .disabled(service.pngCount == 0)
                     }
-                    .disabled(service.isWorking || service.pngCount == 0)
                 }
 
-                if service.isWorking {
+                if service.isWorking || service.total > 0 {
                     Section("处理进度") {
                         ProgressView(value: service.progress)
-                        Text("\(service.processed) / \(service.total)")
-                            .frame(maxWidth: .infinity, alignment: .center)
+
+                        HStack {
+                            Text("\(service.processed) / \(service.total)")
+                            Spacer()
+                            Text("\(Int(service.progress * 100))%")
+                        }
+                        .font(.footnote)
+
+                        Text(service.status)
+                            .font(.footnote)
                     }
                 }
 

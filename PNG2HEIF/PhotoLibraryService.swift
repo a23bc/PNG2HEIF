@@ -1,7 +1,6 @@
 import Foundation
 import Photos
 import ImageIO
-import UniformTypeIdentifiers
 import UIKit
 import Combine
 
@@ -18,40 +17,35 @@ final class PhotoLibraryService: ObservableObject {
     @Published var alert: AlertItem?
 
     private var assets: [PHAsset] = []
-    private let workerQueue = DispatchQueue(label: "PNG2HEIF.worker", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "PNG2HEIF.serial", qos: .userInitiated)
+    private var stopRequested = false
 
     var pngSizeText: String {
         ByteCountFormatter.string(fromByteCount: pngSize, countStyle: .file)
     }
 
     func requestAuthorizationAndScan() {
+        let handler: (PHAuthorizationStatus) -> Void = { [weak self] status in
+            DispatchQueue.main.async {
+                guard status == .authorized || status == .limited else {
+                    self?.status = "没有照片图库访问权限"
+                    return
+                }
+                self?.scan()
+            }
+        }
+
         if #available(iOS 14, *) {
-            PHPhotoLibrary.requestAuthorization(for: .readWrite) { [weak self] status in
-                DispatchQueue.main.async {
-                    guard status == .authorized || status == .limited else {
-                        self?.status = "没有照片图库访问权限"
-                        return
-                    }
-                    self?.scan()
-                }
-            }
+            PHPhotoLibrary.requestAuthorization(for: .readWrite, handler: handler)
         } else {
-            PHPhotoLibrary.requestAuthorization { [weak self] status in
-                DispatchQueue.main.async {
-                    guard status == .authorized else {
-                        self?.status = "没有照片图库访问权限"
-                        return
-                    }
-                    self?.scan()
-                }
-            }
+            PHPhotoLibrary.requestAuthorization(handler)
         }
     }
 
     func scan() {
         guard !isWorking else { return }
 
-        workerQueue.async { [weak self] in
+        queue.async { [weak self] in
             guard let self = self else { return }
 
             let options = PHFetchOptions()
@@ -59,22 +53,21 @@ final class PhotoLibraryService: ObservableObject {
                 NSSortDescriptor(key: "creationDate", ascending: true)
             ]
 
-            // 只获取图片资产；随后通过资源类型/UTI 判断 PNG。
             let result = PHAsset.fetchAssets(with: .image, options: options)
-
             var found: [PHAsset] = []
-            var totalSize: Int64 = 0
+            var size: Int64 = 0
 
             result.enumerateObjects { asset, _, _ in
-                guard self.isPNG(asset: asset) else { return }
-                found.append(asset)
-                totalSize += self.estimatedPNGSize(asset: asset)
+                if self.isPNG(asset: asset) {
+                    found.append(asset)
+                    size += self.estimatedSize(asset: asset)
+                }
             }
 
             DispatchQueue.main.async {
                 self.assets = found
                 self.pngCount = found.count
-                self.pngSize = totalSize
+                self.pngSize = size
                 self.total = found.count
                 self.processed = 0
                 self.progress = 0
@@ -87,39 +80,69 @@ final class PhotoLibraryService: ObservableObject {
         guard !isWorking, !assets.isEmpty else { return }
 
         let work = assets
-        isWorking = true
-        processed = 0
-        total = work.count
-        progress = 0
-        status = "开始转换…"
+        stopRequested = false
 
-        workerQueue.async { [weak self] in
+        DispatchQueue.main.async {
+            self.isWorking = true
+            self.processed = 0
+            self.total = work.count
+            self.progress = 0
+            self.status = "正在准备 HEIF截图 相簿…"
+        }
+
+        ensureAlbum(named: "HEIF截图") { [weak self] album in
             guard let self = self else { return }
 
-            self.ensureAlbum(named: "HEIF截图") { album in
-                guard let album = album else {
-                    self.finish(message: "无法创建或访问 HEIF截图 相簿")
-                    return
-                }
+            guard let album = album else {
+                self.finish("无法创建或访问 HEIF截图 相簿", showAlert: true)
+                return
+            }
 
+            self.queue.async {
                 var success = 0
                 var failures = 0
 
-                for asset in work {
-                    autoreleasepool {
-                        let ok = self.convert(asset: asset, to: album)
-                        if ok { success += 1 } else { failures += 1 }
+                for (index, asset) in work.enumerated() {
+                    if self.stopRequested {
+                        break
+                    }
 
-                        DispatchQueue.main.async {
-                            self.processed += 1
-                            self.progress = Double(self.processed) / Double(max(self.total, 1))
-                            self.status = "已处理 \(self.processed) / \(self.total)"
-                        }
+                    DispatchQueue.main.async {
+                        self.status = "正在转换 \(index + 1) / \(work.count)"
+                    }
+
+                    let ok = self.convertOne(asset: asset, album: album)
+
+                    if ok {
+                        success += 1
+                    } else {
+                        failures += 1
+                    }
+
+                    DispatchQueue.main.async {
+                        self.processed = index + 1
+                        self.progress = Double(index + 1) / Double(max(work.count, 1))
                     }
                 }
 
-                self.finish(message: "完成：成功 \(success) 张，失败 \(failures) 张。")
+                let stopped = self.stopRequested
+                let message: String
+                if stopped {
+                    message = "已停止：完成 \(success) 张，失败 \(failures) 张，剩余未处理。"
+                } else {
+                    message = "完成：成功 \(success) 张，失败 \(failures) 张。"
+                }
+
+                self.finish(message, showAlert: true)
             }
+        }
+    }
+
+    func stop() {
+        guard isWorking else { return }
+        stopRequested = true
+        DispatchQueue.main.async {
+            self.status = "正在停止，当前图片处理完成后停止…"
         }
     }
 
@@ -132,107 +155,127 @@ final class PhotoLibraryService: ObservableObject {
         }
     }
 
-    private func estimatedPNGSize(asset: PHAsset) -> Int64 {
+    private func estimatedSize(asset: PHAsset) -> Int64 {
         let resources = PHAssetResource.assetResources(for: asset)
-        return Int64(resources.first?.value(forKey: "fileSize") as? Int64 ?? 0)
+        guard let value = resources.first?.value(forKey: "fileSize") else { return 0 }
+        if let number = value as? NSNumber { return number.int64Value }
+        return 0
     }
 
-    private func convert(asset: PHAsset, to album: PHAssetCollection) -> Bool {
-        let semaphore = DispatchSemaphore(value: 0)
-        var success = false
-
+    private func convertOne(asset: PHAsset, album: PHAssetCollection) -> Bool {
         let resources = PHAssetResource.assetResources(for: asset)
         guard let resource = resources.first(where: {
             let uti = $0.uniformTypeIdentifier.lowercased()
-            return uti == "public.png" || uti.contains("png") || $0.originalFilename.lowercased().hasSuffix(".png")
+            let filename = $0.originalFilename.lowercased()
+            return uti == "public.png" || uti.contains("png") || filename.hasSuffix(".png")
         }) else {
             return false
         }
 
-        let inputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString + ".png")
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString + ".heic")
-
+        let dir = FileManager.default.temporaryDirectory
+        let inputURL = dir.appendingPathComponent(UUID().uuidString + ".png")
+        let outputURL = dir.appendingPathComponent(UUID().uuidString + ".heic")
         defer {
             try? FileManager.default.removeItem(at: inputURL)
             try? FileManager.default.removeItem(at: outputURL)
         }
 
-        PHAssetResourceManager.default().writeData(for: resource, toFile: inputURL, options: nil) { error in
-            if error != nil {
-                semaphore.signal()
-                return
-            }
+        if !writeResource(resource, to: inputURL) {
+            return false
+        }
 
-            guard let source = CGImageSourceCreateWithURL(inputURL as CFURL, nil),
-                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-                semaphore.signal()
-                return
-            }
-
-            let metadata = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
-            guard let destination = CGImageDestinationCreateWithURL(
+        guard let source = CGImageSourceCreateWithURL(inputURL as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              let destination = CGImageDestinationCreateWithURL(
                 outputURL as CFURL,
                 "public.heic" as CFString,
                 1,
                 nil
-            ) else {
+              ) else {
+            return false
+        }
+
+        var properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
+        properties[kCGImageDestinationLossyCompressionQuality] = 1.0
+
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+
+        guard CGImageDestinationFinalize(destination) else {
+            return false
+        }
+
+        // Don't delete the original until Photos confirms the new asset exists.
+        return saveHEIFAndOptionallyDelete(
+            outputURL: outputURL,
+            sourceAsset: asset,
+            album: album
+        )
+    }
+
+    private func writeResource(_ resource: PHAssetResource, to url: URL) -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        var ok = false
+
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = false
+
+        PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) { error in
+            ok = (error == nil)
+            semaphore.signal()
+        }
+
+        // The resource operation itself is asynchronous. We wait only for this
+        // single file, then return to the serial conversion queue.
+        semaphore.wait()
+        return ok
+    }
+
+    private func saveHEIFAndOptionallyDelete(
+        outputURL: URL,
+        sourceAsset: PHAsset,
+        album: PHAssetCollection
+    ) -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        var created = false
+        var deletionFinished = false
+
+        PHPhotoLibrary.shared().performChanges({
+            guard let request = PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: outputURL) else {
+                return
+            }
+
+            request.creationDate = sourceAsset.creationDate
+            request.location = sourceAsset.location
+            request.isFavorite = sourceAsset.isFavorite
+
+            if let placeholder = request.placeholderForCreatedAsset {
+                let albumRequest = PHAssetCollectionChangeRequest(for: album)
+                albumRequest?.addAssets([placeholder] as NSArray)
+            }
+        }) { [weak self] success, error in
+            guard success, error == nil else {
                 semaphore.signal()
                 return
             }
 
-            var properties = metadata ?? [:]
-            // HEIF 使用无损质量参数以尽量避免截图文字/图形出现明显损失。
-            properties[kCGImageDestinationLossyCompressionQuality] = 1.0
+            created = true
 
-            CGImageDestinationAddImage(destination, image, properties as CFDictionary)
-
-            guard CGImageDestinationFinalize(destination) else {
+            guard self?.deleteOriginals == true else {
+                deletionFinished = true
                 semaphore.signal()
                 return
             }
 
             PHPhotoLibrary.shared().performChanges({
-                guard let request = PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: outputURL) else {
-                    return
-                }
-
-                if let date = asset.creationDate {
-                    request.creationDate = date
-                }
-                if let location = asset.location {
-                    request.location = location
-                }
-                request.isFavorite = asset.isFavorite
-
-                let placeholder = request.placeholderForCreatedAsset
-                if let placeholder = placeholder {
-                    let albumChange = PHAssetCollectionChangeRequest(for: album)
-                    albumChange?.addAssets([placeholder] as NSArray)
-                }
-            }) { [weak self] changed, error in
-                if changed && error == nil {
-                    success = true
-
-                    if self?.deleteOriginals == true {
-                        PHPhotoLibrary.shared().performChanges({
-                            PHAssetChangeRequest.deleteAssets([asset] as NSArray)
-                        }) { deleted, _ in
-                            success = success && deleted
-                            semaphore.signal()
-                        }
-                    } else {
-                        semaphore.signal()
-                    }
-                } else {
-                    semaphore.signal()
-                }
+                PHAssetChangeRequest.deleteAssets([sourceAsset] as NSArray)
+            }) { deleted, _ in
+                deletionFinished = deleted
+                semaphore.signal()
             }
         }
 
         semaphore.wait()
-        return success
+        return created && deletionFinished || (created && deleteOriginals == false)
     }
 
     private func ensureAlbum(named name: String, completion: @escaping (PHAssetCollection?) -> Void) {
@@ -242,40 +285,46 @@ final class PhotoLibraryService: ObservableObject {
             options: nil
         )
 
-        var found: PHAssetCollection?
+        var existing: PHAssetCollection?
         fetch.enumerateObjects { collection, _, stop in
             if collection.localizedTitle == name {
-                found = collection
+                existing = collection
                 stop.pointee = true
             }
         }
 
-        if let found = found {
-            completion(found)
+        if let existing = existing {
+            completion(existing)
             return
         }
 
         var placeholder: PHObjectPlaceholder?
+
         PHPhotoLibrary.shared().performChanges({
             let request = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: name)
             placeholder = request.placeholderForCreatedAssetCollection
-        }) { [weak self] success, _ in
+        }) { success, _ in
             guard success, let id = placeholder?.localIdentifier else {
                 completion(nil)
                 return
             }
-            let result = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [id], options: nil)
+
+            let result = PHAssetCollection.fetchAssetCollections(
+                withLocalIdentifiers: [id],
+                options: nil
+            )
             completion(result.firstObject)
-            self?.status = "已准备 HEIF截图 相簿"
         }
     }
 
-    private func finish(message: String) {
-        DispatchQueue.main.async { [weak self] in
-            self?.isWorking = false
-            self?.status = message
-            self?.scan()
-            self?.alert = AlertItem(title: "转换完成", message: message)
+    private func finish(_ message: String, showAlert: Bool) {
+        DispatchQueue.main.async {
+            self.isWorking = false
+            self.status = message
+            if showAlert {
+                self.alert = AlertItem(title: "PNG → HEIF", message: message)
+            }
+            self.scan()
         }
     }
 }
