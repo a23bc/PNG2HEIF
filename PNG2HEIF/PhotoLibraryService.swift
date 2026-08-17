@@ -469,6 +469,9 @@ final class PhotoLibraryService: ObservableObject {
     // MARK: - Private: Asset Inspection
 
     private func isPNG(asset: PHAsset) -> Bool {
+        // 只处理 iOS 截图
+        guard asset.mediaSubtypes.contains(.photoScreenshot) else { return false }
+        // 确认是 PNG 格式
         let resources = PHAssetResource.assetResources(for: asset)
         return resources.contains {
             let uti = $0.uniformTypeIdentifier.lowercased()
