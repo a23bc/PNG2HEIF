@@ -1,0 +1,52 @@
+name: Build PNG2HEIF IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer || true
+          xcodebuild -version
+
+      - name: Build unsigned archive
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project PNG2HEIF.xcodeproj \
+            -scheme PNG2HEIF \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/PNG2HEIF.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/PNG2HEIF.xcarchive/Products/Applications/PNG2HEIF.app"
+          test -d "$APP"
+          rm -rf "$RUNNER_TEMP/Payload" "$RUNNER_TEMP/PNG2HEIF-unsigned.ipa"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          /usr/bin/zip -qry PNG2HEIF-unsigned.ipa Payload
+          unzip -l PNG2HEIF-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PNG2HEIF-unsigned-ipa
+          path: ${{ runner.temp }}/PNG2HEIF-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,63 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AA000001 /* PNG2HEIFApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001 /* PNG2HEIFApp.swift */; };
+		AA000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000002 /* ContentView.swift */; };
+		AA000003 /* Converter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000003 /* Converter.swift */; };
+		AA000004 /* PhotoLibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000004 /* PhotoLibraryService.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		BB000001 /* PNG2HEIFApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PNG2HEIFApp.swift; sourceTree = "<group>"; };
+		BB000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		BB000003 /* Converter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Converter.swift; sourceTree = "<group>"; };
+		BB000004 /* PhotoLibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryService.swift; sourceTree = "<group>"; };
+		CC000001 /* PNG2HEIF.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PNG2HEIF.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		DD000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		EE000001 = {isa = PBXGroup; children = (EE000002 /* PNG2HEIF */, EE000003 /* Products */); sourceTree = "<group>"; };
+		EE000002 /* PNG2HEIF */ = {isa = PBXGroup; children = (BB000001 /* PNG2HEIFApp.swift */, BB000002 /* ContentView.swift */, BB000003 /* Converter.swift */, BB000004 /* PhotoLibraryService.swift */); path = PNG2HEIF; sourceTree = "<group>"; };
+		EE000003 /* Products */ = {isa = PBXGroup; children = (CC000001 /* PNG2HEIF.app */); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		FF000001 /* PNG2HEIF */ = {isa = PBXNativeTarget; buildConfigurationList = GG000001 /* Build configuration list for PBXNativeTarget "PNG2HEIF" */; buildPhases = (FF000002 /* Sources */, DD000001 /* Frameworks */, FF000003 /* Resources */); buildRules = (); dependencies = (); name = PNG2HEIF; productName = PNG2HEIF; productReference = CC000001 /* PNG2HEIF.app */; productType = "com.apple.product-type.application"; };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		HH000001 /* Project object */ = {isa = PBXProject; attributes = {LastSwiftUpdateCheck = 1500; LastUpgradeCheck = 1500; ORGANIZATIONNAME = "Local"; TargetAttributes = {FF000001 = {CreatedOnToolsVersion = 15.0; }; }; }; buildConfigurationList = HH000002 /* Build configuration list for PBXProject "PNG2HEIF" */; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = EE000001; productRefGroup = EE000003 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (FF000001 /* PNG2HEIF */); };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		FF000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		FF000002 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (AA000001 /* PNG2HEIFApp.swift in Sources */, AA000002 /* ContentView.swift in Sources */, AA000003 /* Converter.swift in Sources */, AA000004 /* PhotoLibraryService.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		GG000002 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; INFOPLIST_FILE = PNG2HEIF/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = "local.PNG2HEIF"; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
+		GG000003 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; INFOPLIST_FILE = PNG2HEIF/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = "local.PNG2HEIF"; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+		HH000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; name = Debug; };
+		HH000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; SWIFT_OPTIMIZATION_LEVEL = "-O"; }; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		GG000001 /* Build configuration list for PBXNativeTarget "PNG2HEIF" */ = {isa = XCConfigurationList; buildConfigurations = (GG000002 /* Debug */, GG000003 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		HH000002 /* Build configuration list for PBXProject "PNG2HEIF" */ = {isa = XCConfigurationList; buildConfigurations = (HH000003 /* Debug */, HH000004 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = HH000001 /* Project object */;
+}
