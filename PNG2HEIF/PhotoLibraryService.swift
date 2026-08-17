@@ -110,7 +110,7 @@ final class PhotoLibraryService: ObservableObject {
     func loadAlbums() {
         let fetch = PHAssetCollection.fetchAssetCollections(
             with: .album,
-            subtype: .albumUserCreated,
+            subtype: .albumRegular,
             options: nil
         )
         var albums: [AlbumItem] = []
@@ -563,7 +563,7 @@ final class PhotoLibraryService: ObservableObject {
                     albumChange?.addAssets([placeholder] as NSArray)
                 }
             }
-        }) { [weak self] changed, error in
+        }) { changed, error in
             if changed && error == nil {
                 convertSuccess = true
 
