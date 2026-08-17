@@ -14,11 +14,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Show Xcode version
-        run: xcodebuild -version
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcode-select -p
 
       - name: Build unsigned iOS archive
         run: |
           set -euo pipefail
+
           xcodebuild \
             -project PNG2HEIF.xcodeproj \
             -scheme PNG2HEIF \
@@ -31,17 +35,90 @@ jobs:
             AD_HOC_CODE_SIGNING_ALLOWED=NO \
             archive
 
-      - name: Package unsigned IPA
+      - name: Validate archived app bundle
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/Payload"
-          cp -R "$RUNNER_TEMP/PNG2HEIF.xcarchive/Products/Applications/PNG2HEIF.app" "$RUNNER_TEMP/Payload/"
-          cd "$RUNNER_TEMP"
-          zip -qry PNG2HEIF-unsigned.ipa Payload
+
+          APP="$RUNNER_TEMP/PNG2HEIF.xcarchive/Products/Applications/PNG2HEIF.app"
+          BIN="$APP/PNG2HEIF"
+          PLIST="$APP/Info.plist"
+
+          echo "=== App bundle ==="
+          ls -la "$APP"
+
+          test -d "$APP"
+          test -f "$PLIST"
+          test -f "$BIN"
+
+          echo "=== Info.plist ==="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :CFBundlePackageType" "$PLIST"
+
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST")
+          test "$EXEC" = "PNG2HEIF"
+          test -f "$APP/$EXEC"
+
+          echo "=== Main executable ==="
+          file "$BIN"
+          /usr/bin/lipo -info "$BIN"
+
+          file "$BIN" | grep -E 'Mach-O.*(arm64|64-bit)' >/dev/null
+          /usr/bin/lipo -archs "$BIN" | grep -qw arm64
+
+          echo "=== Code signature state ==="
+          codesign -dvv "$APP" 2>&1 || true
+
+          echo "App bundle validation passed."
+
+      - name: Package TrollStore IPA
+        run: |
+          set -euo pipefail
+
+          APP="$RUNNER_TEMP/PNG2HEIF.xcarchive/Products/Applications/PNG2HEIF.app"
+          WORK="$RUNNER_TEMP/ipa"
+          rm -rf "$WORK"
+          mkdir -p "$WORK/Payload"
+
+          cp -R "$APP" "$WORK/Payload/"
+
+          cd "$WORK"
+          /usr/bin/zip -qry "$RUNNER_TEMP/PNG2HEIF-TrollStore.ipa" Payload
+
+          echo "=== IPA contents ==="
+          /usr/bin/unzip -l "$RUNNER_TEMP/PNG2HEIF-TrollStore.ipa"
+
+      - name: Validate final IPA
+        run: |
+          set -euo pipefail
+
+          IPA="$RUNNER_TEMP/PNG2HEIF-TrollStore.ipa"
+          CHECK="$RUNNER_TEMP/ipa-check"
+          rm -rf "$CHECK"
+          mkdir -p "$CHECK"
+
+          /usr/bin/unzip -q "$IPA" -d "$CHECK"
+
+          APP="$CHECK/Payload/PNG2HEIF.app"
+          BIN="$APP/PNG2HEIF"
+
+          test -d "$APP"
+          test -f "$APP/Info.plist"
+          test -f "$BIN"
+
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          test "$EXEC" = "PNG2HEIF"
+          test -f "$APP/$EXEC"
+
+          file "$BIN"
+          /usr/bin/lipo -archs "$BIN" | grep -qw arm64
+
+          echo "Final IPA validation passed."
+          echo "TrollStore IPA: $IPA"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: PNG2HEIF-unsigned-ipa
-          path: ${{ runner.temp }}/PNG2HEIF-unsigned.ipa
+          name: PNG2HEIF-TrollStore-IPA
+          path: ${{ runner.temp }}/PNG2HEIF-TrollStore.ipa
           if-no-files-found: error

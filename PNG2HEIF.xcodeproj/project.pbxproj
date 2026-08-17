@@ -169,6 +169,7 @@
 			buildSettings = {
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.PNG2HEIF;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				EXECUTABLE_NAME = "$(PRODUCT_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				INFOPLIST_FILE = PNG2HEIF/Info.plist;
 			};
@@ -179,6 +180,7 @@
 			buildSettings = {
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.PNG2HEIF;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				EXECUTABLE_NAME = "$(PRODUCT_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				INFOPLIST_FILE = PNG2HEIF/Info.plist;
 			};
