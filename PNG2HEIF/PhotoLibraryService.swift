@@ -326,15 +326,24 @@ final class PhotoLibraryService: ObservableObject {
             //    截图以文字/线条为主，0.82 几乎无损但体积远小于 1.0
             metadata[kCGImageDestinationLossyCompressionQuality] = self?.compressionQuality ?? 0.82
 
-            // ✅ 保留原始色彩配置文件（sRGB / P3），避免不必要的色彩空间转换
-            //    原始 metadata 中已包含 ICC Profile，直接传递即可
+            // ✅✅ 关键修复：将原始日期写入 HEIF 文件的 EXIF 元数据
+            //    仅设 request.creationDate 不够——Photos 导入文件时会读取文件内嵌的
+            //    EXIF DateTimeOriginal，如果缺失就用「当前时间」，导致出现在最新位置。
+            //    必须在编码前把日期写进文件本身。
+            if self?.keepCreationDate == true, let originalDate = asset.creationDate {
+                let exifFormatter = DateFormatter()
+                exifFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+                let dateString = exifFormatter.string(from: originalDate)
 
-            // ✅ 尝试保留截图标识：Apple 截图在 PNG tEXt chunk 中
-            //    写入 kCGImagePropertyPNGDictionary 中的特定 key
-            if var pngDict = metadata[kCGImagePropertyPNGDictionary] as? [CFString: Any] {
-                // Apple 截图的软件标识
-                pngDict[kCGImagePropertyPNGAuthor] = "screenshot" as CFString
-                metadata[kCGImagePropertyPNGDictionary] = pngDict
+                var exif = (metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+                exif[kCGImagePropertyExifDateTimeOriginal] = dateString
+                exif[kCGImagePropertyExifDateTimeDigitized] = dateString
+                metadata[kCGImagePropertyExifDictionary] = exif
+
+                // 也写入 TIFF 字典（部分读取器会从这里取日期）
+                var tiff = (metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
+                tiff[kCGImagePropertyTIFFDateTime] = dateString
+                metadata[kCGImagePropertyTIFFDictionary] = tiff
             }
 
             CGImageDestinationAddImage(destination, cgImage, metadata as CFDictionary)
