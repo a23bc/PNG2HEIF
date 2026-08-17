@@ -262,7 +262,7 @@ final class PhotoLibraryService: ObservableObject {
         semaphore.wait(timeout: .now() + 30)
         let ratio = Float(heifSize) / Float(pngSize)
         // 限制在合理范围
-        return (0.01...1.0).clamp(ratio)
+        return clampFloat(ratio, 0.01...1.0)
     }
 
     // MARK: - Private: Single Asset Conversion
@@ -396,9 +396,7 @@ final class PhotoLibraryService: ObservableObject {
                 creationRequest.isFavorite = fav
 
                 // ② 以 resource 方式写入文件数据（而非 fromFileURL）
-                let resOpts = PHAssetResourceCreationOptions()
-                resOpts.isOriginal = true
-                creationRequest.addResource(with: .photo, data: heifData, options: resOpts)
+                creationRequest.addResource(with: .photo, data: heifData, options: nil)
 
                 // 加入相簿
                 let placeholder = creationRequest.placeholderForCreatedAsset
@@ -487,8 +485,6 @@ final class PhotoLibraryService: ObservableObject {
 
 // MARK: - Float Clamp Extension
 
-extension ClosedRange where Bound: Comparable {
-    func clamp(_ value: Bound) -> Bound {
-        return min(max(value, lowerBound), upperBound)
-    }
+private func clampFloat(_ value: Float, _ range: ClosedRange<Float>) -> Float {
+    return Swift.min(Swift.max(value, range.lowerBound), range.upperBound)
 }
