@@ -2,18 +2,16 @@ import SwiftUI
 import Photos
 import UniformTypeIdentifiers
 
-// MARK: - Folder Picker (UIDocumentPicker → SwiftUI)
+// MARK: - Folder Picker
 
 struct FolderPicker: UIViewControllerRepresentable {
     let onPick: (URL) -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forExporting: [], asCopy: true)
-        // 让用户选择文件夹
         picker.allowsMultipleSelection = false
         picker.shouldShowFileExtensions = true
         picker.delegate = context.coordinator
-        // 请求访问权限
         picker.accessibilityElementsHidden = false
         return picker
     }
@@ -28,7 +26,6 @@ struct FolderPicker: UIViewControllerRepresentable {
 
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
             guard let url = urls.first else { return }
-            // 用户选的是文件夹，获取 security-scoped 权限
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
             onPick(url)
@@ -43,40 +40,65 @@ struct FolderPicker: UIViewControllerRepresentable {
 struct ContentView: View {
     @StateObject private var service = PhotoLibraryService()
     @State private var showFolderPicker = false
+    @State private var showClearConfirm = false
 
     var body: some View {
         NavigationView {
             Form {
-                // MARK: - 统计概览
+                // MARK: - 扫描结果
                 Section {
                     HStack {
-                        Text("PNG 截图")
+                        Text("待转换 PNG")
                         Spacer()
                         Text("\(service.pngCount) 张")
                             .foregroundColor(.secondary)
+                            .monospacedDigit()
                     }
-                    HStack {
-                        Text("原始占用")
-                        Spacer()
-                        Text(service.pngSizeText)
-                            .foregroundColor(.secondary)
-                    }
-                    if service.pngCount > 0 {
+                    if service.skippedCount > 0 {
                         HStack {
-                            Text("预计转换后")
+                            Text("已跳过（历史记录）")
                             Spacer()
-                            Text("~\(service.estimatedSizeText)")
-                                .foregroundColor(.secondary)
+                            Text("\(service.skippedCount) 张")
+                                .foregroundColor(.orange)
+                                .monospacedDigit()
                         }
+                    }
+                    if service.historyCount > 0 {
                         HStack {
-                            Text("预计节省")
+                            Text("累计已转换")
+                            Spacer()
+                            Text("\(service.historyCount) 张")
+                                .foregroundColor(.green)
+                                .monospacedDigit()
+                        }
+                    }
+                    if service.totalSizeSaved > 0 {
+                        HStack {
+                            Text("已节省空间")
                             Spacer()
                             Text(service.savedSizeText)
                                 .foregroundColor(.green)
+                                .fontWeight(.medium)
                         }
                     }
                 } header: {
                     Text("照片图库")
+                } footer: {
+                    if service.historyCount > 0 {
+                        Button("清除转换记录（重新扫描全部 PNG）") {
+                            showClearConfirm = true
+                        }
+                        .foregroundColor(.red)
+                        .font(.footnote)
+                    }
+                }
+                .alert("确认清除", isPresented: $showClearConfirm) {
+                    Button("取消", role: .cancel) {}
+                    Button("清除", role: .destructive) {
+                        service.clearHistory()
+                    }
+                } message: {
+                    Text("将清除所有转换记录，下次扫描会重新发现所有 PNG 截图。已转换的文件不会被撤回。")
                 }
 
                 // MARK: - 导出位置
@@ -87,14 +109,12 @@ struct ContentView: View {
                         }
                     }
                     .onChange(of: service.exportMode) { _ in
-                        // 切换模式时重置文件夹选择
                         if service.exportMode != .folder {
                             service.exportFolderURL = nil
                             service.exportFolderName = nil
                         }
                     }
 
-                    // 指定相簿 → 显示相簿列表
                     if service.exportMode == .album {
                         if service.userAlbums.isEmpty {
                             Text("没有用户相簿")
@@ -109,8 +129,8 @@ struct ContentView: View {
                                         Spacer()
                                         Text("\(album.count) 张")
                                             .foregroundColor(.secondary)
-                                            Text(Image(systemName: "chevron.right"))
-                                                .foregroundColor(.secondary)
+                                        Text(Image(systemName: "chevron.right"))
+                                            .foregroundColor(.secondary)
                                     }
                                     .tag(Optional(album.id))
                                 }
@@ -118,7 +138,6 @@ struct ContentView: View {
                         }
                     }
 
-                    // 新建相簿 → 输入名称
                     if service.exportMode == .newAlbum {
                         HStack {
                             TextField("相簿名称", text: $service.newAlbumName)
@@ -127,7 +146,6 @@ struct ContentView: View {
                         }
                     }
 
-                    // 文件夹 → 选择按钮
                     if service.exportMode == .folder {
                         Button {
                             showFolderPicker = true
@@ -172,7 +190,6 @@ struct ContentView: View {
                 // MARK: - 转换选项
                 Section {
                     Toggle("转换成功后删除 PNG", isOn: $service.deleteOriginals)
-                    Toggle("保留原始日期", isOn: $service.keepCreationDate)
 
                     if #available(iOS 15, *) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -192,7 +209,7 @@ struct ContentView: View {
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }
-                            Text("0.82 接近 iOS 快捷指令效果，截图推荐 0.75-0.85")
+                            Text("0.82 接近 iOS 原生转换效果，截图推荐 0.75-0.85")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
@@ -248,9 +265,47 @@ struct ContentView: View {
                                     .monospacedDigit()
                                     .foregroundColor(.blue)
                             }
+                            if service.totalSizeSaved > 0 {
+                                Text("已节省 \(service.savedSizeText)")
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                            }
                         }
                     } header: {
                         Text("处理进度")
+                    }
+                }
+
+                // MARK: - 失败列表
+                if !service.failedItems.isEmpty && !service.isWorking {
+                    Section {
+                        ForEach(service.failedItems) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.red)
+                                        .font(.caption)
+                                    Text(item.fileName)
+                                        .font(.subheadline)
+                                        .lineLimit(1)
+                                    Spacer()
+                                }
+                                Text(item.error)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    } header: {
+                        HStack {
+                            Text("失败列表")
+                            Spacer()
+                            Text("\(service.failedItems.count) 张")
+                                .foregroundColor(.red)
+                                .fontWeight(.medium)
+                        }
+                    } footer: {
+                        Text("这些图片转换失败，可能是因为文件损坏或 iCloud 下载超时。重新扫描后可再次尝试转换。")
                     }
                 }
 
@@ -279,7 +334,6 @@ struct ContentView: View {
                 FolderPicker { url in
                     service.exportFolderURL = url
                     service.exportFolderName = url.lastPathComponent
-                    // 持久化访问权限
                     url.startAccessingSecurityScopedResource()
                 }
             }
