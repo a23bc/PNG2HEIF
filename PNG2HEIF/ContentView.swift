@@ -2,57 +2,80 @@ import SwiftUI
 import Photos
 
 struct ContentView: View {
-    @StateObject private var model = ConverterModel()
+    @StateObject private var service = PhotoLibraryService()
 
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("PNG 截图")) {
+                Section("照片图库") {
                     HStack {
-                        Text("可转换")
+                        Text("PNG 截图")
                         Spacer()
-                        Text("\(model.pngCount)")
-                            .monospacedDigit()
+                        Text("\(service.pngCount)")
                     }
                     HStack {
-                        Text("估算 PNG 占用")
+                        Text("PNG 占用空间")
                         Spacer()
-                        Text(ByteCountFormatter.string(fromByteCount: model.pngBytes, countStyle: .file))
-                            .monospacedDigit()
+                        Text(service.pngSizeText)
                     }
                 }
 
-                Section(header: Text("选项")) {
-                    Toggle("只转换 PNG", isOn: $model.onlyPNG)
-                    Toggle("保留原始日期", isOn: $model.keepCreationDate)
-                    Toggle("转换成功后删除 PNG", isOn: $model.deleteOriginals)
-                    Toggle("加入“HEIF截图”相簿", isOn: $model.addToAlbum)
+                Section("选项") {
+                    Toggle("转换成功后删除 PNG", isOn: $service.deleteOriginals)
+                    Toggle("只处理 PNG", isOn: $service.onlyPNG)
                 }
 
                 Section {
-                    Button(model.running ? "转换中…" : "开始转换") {
-                        model.start()
+                    Button {
+                        service.scan()
+                    } label: {
+                        Label("扫描图库", systemImage: "magnifyingglass")
                     }
-                    .disabled(model.running || model.pngCount == 0)
+                    .disabled(service.isWorking)
+
+                    Button {
+                        service.startConversion()
+                    } label: {
+                        Label("开始转换", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(service.isWorking || service.pngCount == 0)
                 }
 
-                if model.running {
-                    Section {
-                        ProgressView(value: model.progress)
-                        Text("\(model.processed) / \(model.total)")
+                if service.isWorking {
+                    Section("处理进度") {
+                        ProgressView(value: service.progress)
+                        Text("\(service.processed) / \(service.total)")
                             .frame(maxWidth: .infinity, alignment: .center)
                     }
                 }
 
-                if !model.status.isEmpty {
-                    Section(header: Text("状态")) {
-                        Text(model.status)
-                            .font(.footnote)
-                    }
+                Section("状态") {
+                    Text(service.status)
+                        .font(.footnote)
                 }
             }
             .navigationTitle("PNG → HEIF")
+            .onAppear {
+                service.requestAuthorizationAndScan()
+            }
+            .alert(item: $service.alert) { item in
+                Alert(
+                    title: Text(item.title),
+                    message: Text(item.message),
+                    dismissButton: .default(Text("好"))
+                )
+            }
         }
-        .onAppear { model.refresh() }
+    }
+}
+
+final class AlertItem: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+
+    init(title: String, message: String) {
+        self.title = title
+        self.message = message
     }
 }

@@ -7,57 +7,205 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AA000001 /* PNG2HEIFApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001 /* PNG2HEIFApp.swift */; };
-		AA000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000002 /* ContentView.swift */; };
-		AA000003 /* Converter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000003 /* Converter.swift */; };
-		AA000004 /* PhotoLibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000004 /* PhotoLibraryService.swift */; };
+		AA0000000000000000000001 /* PNG2HEIFApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000011 /* PNG2HEIFApp.swift */; };
+		AA0000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000012 /* ContentView.swift */; };
+		AA0000000000000000000003 /* PhotoLibraryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000013 /* PhotoLibraryService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		BB000001 /* PNG2HEIFApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PNG2HEIFApp.swift; sourceTree = "<group>"; };
-		BB000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		BB000003 /* Converter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Converter.swift; sourceTree = "<group>"; };
-		BB000004 /* PhotoLibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryService.swift; sourceTree = "<group>"; };
-		CC000001 /* PNG2HEIF.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PNG2HEIF.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA0000000000000000000010 /* PNG2HEIF.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PNG2HEIF.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA0000000000000000000011 /* PNG2HEIFApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PNG2HEIFApp.swift; sourceTree = "<group>"; };
+		AA0000000000000000000012 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		AA0000000000000000000013 /* PhotoLibraryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibraryService.swift; sourceTree = "<group>"; };
+		AA0000000000000000000014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		DD000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		AA0000000000000000000021 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		EE000001 = {isa = PBXGroup; children = (EE000002 /* PNG2HEIF */, EE000003 /* Products */); sourceTree = "<group>"; };
-		EE000002 /* PNG2HEIF */ = {isa = PBXGroup; children = (BB000001 /* PNG2HEIFApp.swift */, BB000002 /* ContentView.swift */, BB000003 /* Converter.swift */, BB000004 /* PhotoLibraryService.swift */); path = PNG2HEIF; sourceTree = "<group>"; };
-		EE000003 /* Products */ = {isa = PBXGroup; children = (CC000001 /* PNG2HEIF.app */); name = Products; sourceTree = "<group>"; };
+		AA0000000000000000000030 = {
+			isa = PBXGroup;
+			children = (
+				AA0000000000000000000031 /* PNG2HEIF */,
+				AA0000000000000000000032 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		AA0000000000000000000031 /* PNG2HEIF */ = {
+			isa = PBXGroup;
+			children = (
+				AA0000000000000000000011 /* PNG2HEIFApp.swift */,
+				AA0000000000000000000012 /* ContentView.swift */,
+				AA0000000000000000000013 /* PhotoLibraryService.swift */,
+				AA0000000000000000000014 /* Info.plist */,
+			);
+			path = PNG2HEIF;
+			sourceTree = "<group>";
+		};
+		AA0000000000000000000032 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				AA0000000000000000000010 /* PNG2HEIF.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		FF000001 /* PNG2HEIF */ = {isa = PBXNativeTarget; buildConfigurationList = GG000001 /* Build configuration list for PBXNativeTarget "PNG2HEIF" */; buildPhases = (FF000002 /* Sources */, DD000001 /* Frameworks */, FF000003 /* Resources */); buildRules = (); dependencies = (); name = PNG2HEIF; productName = PNG2HEIF; productReference = CC000001 /* PNG2HEIF.app */; productType = "com.apple.product-type.application"; };
+		AA0000000000000000000040 /* PNG2HEIF */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA0000000000000000000061 /* Build configuration list for PBXNativeTarget "PNG2HEIF" */;
+			buildPhases = (
+				AA0000000000000000000022 /* Sources */,
+				AA0000000000000000000021 /* Frameworks */,
+				AA0000000000000000000023 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PNG2HEIF;
+			productName = PNG2HEIF;
+			productReference = AA0000000000000000000010 /* PNG2HEIF.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		HH000001 /* Project object */ = {isa = PBXProject; attributes = {LastSwiftUpdateCheck = 1500; LastUpgradeCheck = 1500; ORGANIZATIONNAME = "Local"; TargetAttributes = {FF000001 = {CreatedOnToolsVersion = 15.0; }; }; }; buildConfigurationList = HH000002 /* Build configuration list for PBXProject "PNG2HEIF" */; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = EE000001; productRefGroup = EE000003 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (FF000001 /* PNG2HEIF */); };
+		AA0000000000000000000050 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 1640;
+				TargetAttributes = {
+					AA0000000000000000000040 = {
+						LastSwiftMigration = 1600;
+					};
+				};
+			};
+			buildConfigurationList = AA0000000000000000000060 /* Build configuration list for PBXProject "PNG2HEIF" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = AA0000000000000000000030;
+			productRefGroup = AA0000000000000000000032 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AA0000000000000000000040 /* PNG2HEIF */,
+			);
+		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		FF000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		AA0000000000000000000023 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		FF000002 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (AA000001 /* PNG2HEIFApp.swift in Sources */, AA000002 /* ContentView.swift in Sources */, AA000003 /* Converter.swift in Sources */, AA000004 /* PhotoLibraryService.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		AA0000000000000000000022 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA0000000000000000000001 /* PNG2HEIFApp.swift in Sources */,
+				AA0000000000000000000002 /* ContentView.swift in Sources */,
+				AA0000000000000000000003 /* PhotoLibraryService.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
-		GG000002 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; INFOPLIST_FILE = PNG2HEIF/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = "local.PNG2HEIF"; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
-		GG000003 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; INFOPLIST_FILE = PNG2HEIF/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = "local.PNG2HEIF"; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
-		HH000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; name = Debug; };
-		HH000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; SWIFT_OPTIMIZATION_LEVEL = "-O"; }; name = Release; };
+		AA0000000000000000000070 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		AA0000000000000000000071 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = iphoneos;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		AA0000000000000000000080 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.PNG2HEIF;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				INFOPLIST_FILE = PNG2HEIF/Info.plist;
+			};
+			name = Debug;
+		};
+		AA0000000000000000000081 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.PNG2HEIF;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				INFOPLIST_FILE = PNG2HEIF/Info.plist;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		GG000001 /* Build configuration list for PBXNativeTarget "PNG2HEIF" */ = {isa = XCConfigurationList; buildConfigurations = (GG000002 /* Debug */, GG000003 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		HH000002 /* Build configuration list for PBXProject "PNG2HEIF" */ = {isa = XCConfigurationList; buildConfigurations = (HH000003 /* Debug */, HH000004 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		AA0000000000000000000060 /* Build configuration list for PBXProject "PNG2HEIF" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA0000000000000000000070 /* Debug */,
+				AA0000000000000000000071 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA0000000000000000000061 /* Build configuration list for PBXNativeTarget "PNG2HEIF" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA0000000000000000000080 /* Debug */,
+				AA0000000000000000000081 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 	};
-	rootObject = HH000001 /* Project object */;
+	rootObject = AA0000000000000000000050 /* Project object */;
 }
