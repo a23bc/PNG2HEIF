@@ -22,10 +22,7 @@ struct ContentView: View {
 
                 Section("选项") {
                     Toggle("转换成功后删除 PNG", isOn: $service.deleteOriginals)
-                        .disabled(service.isWorking)
-
                     Toggle("只处理 PNG", isOn: $service.onlyPNG)
-                        .disabled(service.isWorking)
                 }
 
                 Section {
@@ -36,13 +33,7 @@ struct ContentView: View {
                     }
                     .disabled(service.isWorking)
 
-                    if service.isWorking {
-                        Button(role: .destructive) {
-                            service.stop()
-                        } label: {
-                            Label("停止转换", systemImage: "stop.circle")
-                        }
-                    } else {
+                    if !service.isWorking {
                         Button {
                             service.startConversion()
                         } label: {
@@ -50,21 +41,22 @@ struct ContentView: View {
                         }
                         .disabled(service.pngCount == 0)
                     }
+
+                    // ✅ 新增：转换中显示停止按钮
+                    if service.isWorking {
+                        Button(role: .destructive) {
+                            service.stopConversion()
+                        } label: {
+                            Label("停止转换", systemImage: "stop.circle.fill")
+                        }
+                    }
                 }
 
-                if service.isWorking || service.total > 0 {
+                if service.isWorking {
                     Section("处理进度") {
                         ProgressView(value: service.progress)
-
-                        HStack {
-                            Text("\(service.processed) / \(service.total)")
-                            Spacer()
-                            Text("\(Int(service.progress * 100))%")
-                        }
-                        .font(.footnote)
-
-                        Text(service.status)
-                            .font(.footnote)
+                        Text("\(service.processed) / \(service.total)")
+                            .frame(maxWidth: .infinity, alignment: .center)
                     }
                 }
 
