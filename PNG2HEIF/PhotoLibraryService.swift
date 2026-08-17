@@ -354,26 +354,54 @@ final class PhotoLibraryService: ObservableObject {
                 return
             }
 
+            // ✅✅ 三重保险：给文件本身也打上正确的时间戳
+            //    Photos 导入时可能会读取文件系统时间作为 fallback
+            if self?.keepCreationDate == true, let originalDate = asset.creationDate {
+                try? FileManager.default.setAttributes([
+                    .creationDate: originalDate,
+                    .modificationDate: originalDate
+                ], ofItemAtPath: outputURL.path)
+            }
+
             // ---- 写入照片库 ----
+            // ✅✅ 关键改动：用 PHAssetCreationRequest 替代 creationRequestForAssetFromImage
+            //    后者创建的资产，Photos 内部会忽略 request.creationDate，
+            //    改用导入时间或文件系统时间作为「最近项目」排序依据。
+            //    PHAssetCreationRequest.forAsset() 对 creationDate 的控制更直接。
+            let originalDate = asset.creationDate
+            let shouldKeepDate = self?.keepCreationDate ?? true
+            let loc = asset.location
+            let fav = asset.isFavorite
+            let shouldDelete = self?.deleteOriginals ?? false
+            let heifData = try? Data(contentsOf: outputURL)
+
+            guard let heifData = heifData else {
+                print("[PNG2HEIF] 读取 HEIF Data 失败")
+                semaphore.signal()
+                return
+            }
+
             PHPhotoLibrary.shared().performChanges({
-                guard let request = PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: outputURL) else {
-                    return
-                }
+                let creationRequest = PHAssetCreationRequest.forAsset()
 
-                // ✅ 关键：设置 creationDate = 原始 PNG 的 creationDate
-                //    这样在「最近项目」中，HEIF 会出现在和原 PNG 相同的时间位置
-                if self?.keepCreationDate == true, let date = asset.creationDate {
-                    request.creationDate = date
+                // ① 设置 creationDate
+                if shouldKeepDate, let date = originalDate {
+                    creationRequest.creationDate = date
                 }
-                // 保留位置信息
-                if let location = asset.location {
-                    request.location = location
+                // 保留位置
+                if let loc = loc {
+                    creationRequest.location = loc
                 }
-                // 保留收藏状态
-                request.isFavorite = asset.isFavorite
+                // 保留收藏
+                creationRequest.isFavorite = fav
 
-                // 加入指定相簿
-                let placeholder = request.placeholderForCreatedAsset
+                // ② 以 resource 方式写入文件数据（而非 fromFileURL）
+                let resOpts = PHAssetResourceCreationOptions()
+                resOpts.isOriginal = true
+                creationRequest.addResource(with: .photo, data: heifData, options: resOpts)
+
+                // 加入相簿
+                let placeholder = creationRequest.placeholderForCreatedAsset
                 if let placeholder = placeholder {
                     let albumChange = PHAssetCollectionChangeRequest(for: album)
                     albumChange?.addAssets([placeholder] as NSArray)
@@ -382,8 +410,7 @@ final class PhotoLibraryService: ObservableObject {
                 if changed && error == nil {
                     convertSuccess = true
 
-                    // 确认 HEIF 写入成功后，再删除原 PNG
-                    if self?.deleteOriginals == true {
+                    if shouldDelete {
                         PHPhotoLibrary.shared().performChanges({
                             PHAssetChangeRequest.deleteAssets([asset] as NSArray)
                         }) { deleted, _ in
