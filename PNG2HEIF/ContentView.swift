@@ -9,7 +9,8 @@ struct FolderPicker: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         // asCopy: false — 我们要拿到真实目录路径，不要副本
-        let picker = UIDocumentPickerViewController(forExporting: [], asCopy: false)
+        // 用「打开文件夹」模式，而不是 forExporting（那个会显示「移动」按钮）
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.folder], asCopy: false)
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator
         return picker
@@ -38,6 +39,7 @@ struct FolderPicker: UIViewControllerRepresentable {
 
 struct ContentView: View {
     @StateObject private var service = PhotoLibraryService()
+    @AppStorage("deleteOriginals") private var deleteOriginals = false
     @State private var showFolderPicker = false
     @State private var showClearConfirm = false
 
@@ -200,7 +202,10 @@ struct ContentView: View {
 
                 // MARK: - 转换选项
                 Section {
-                    Toggle("转换成功后删除 PNG", isOn: $service.deleteOriginals)
+                    Toggle("转换成功后删除 PNG", isOn: $deleteOriginals)
+                        .onChange(of: deleteOriginals) { newValue in
+                            service.deleteOriginals = newValue
+                        }
 
                     if #available(iOS 15, *) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -332,6 +337,7 @@ struct ContentView: View {
             }
             .navigationTitle("PNG \u{2192} HEIF")
             .onAppear {
+                service.deleteOriginals = deleteOriginals
                 service.requestAuthorizationAndScan()
             }
             .alert(item: $service.alert) { item in
