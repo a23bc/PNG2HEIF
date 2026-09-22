@@ -63,6 +63,37 @@ Workflow 会使用 macOS 15 runner 编译 iOS App，并生成：
 3. **需要写几列**：目前只写 `ZKINDSUBTYPE`（真机验证过单这一列就够让界面变截图）。
    对照行里的 `cloud`（`ZCLOUDKINDSUBTYPE`，真实截图是 3）可以先观察，不急着写
 
+### 权限：为什么一开始提示"文件不存在"
+
+App 是沙盒里的，`/var/mobile/Media/PhotoData` 根本不在可达范围内 —— 不是路径写错，是没权限。
+`PNG2HEIF/PNG2HEIF.entitlements` 与 PhotosDatabaseInspector 用的是同一套（那份在真机上验证过
+能读这个库、也能写）：`com.apple.private.security.no-sandbox`、`platform-application`、
+`container-required=false`，加上绝对路径只读例外。
+
+要真正生效，两件事缺一不可：
+
+- entitlements 必须写进 Mach-O 的 **`__TEXT,__entitlements` 段** —— ldid/TrollStore 读的是这个段，
+  不是代码签名。workflow 里用
+  `OTHER_LDFLAGS='$(inherited) -Wl,-sectcreate,__TEXT,__entitlements,...'` 把段塞进去
+- 包再 ad-hoc 签一次同样的 entitlements，签名和段保持一致
+
+CI 里这三步都是**硬检查**（不通过就失败）：`otool -l` 必须找到 `__entitlements` 段、
+`codesign -d --entitlements` 必须报出 `no-sandbox` 与 `platform-application`，
+并把段内容解出来打日志。构建设置写在 workflow 命令行里，`project.pbxproj` 保持不动。
+
+### 自选转换：应用内选图 + 选图与 SQL 行对应
+
+- 「在图库里选择照片」用 `PHPickerViewController`（进程内运行，不需要额外授权弹窗）。
+  configuration 带 `photoLibrary: .shared()`，这才会有 `PHPickerResult.assetIdentifier` ——
+  它就是"选中的这张图 → PHAsset → Photos.sqlite 里那一行"的纽带
+- 只转换选中的这些：`convertSelected()` 按 localIdentifier 取回 PHAsset（保持选择顺序），
+  已不在图库的会如实报数；走的是和全量扫描同一条流水线
+- **对应关系是核对出来的，不是假设的**：转换后拿新建资产的 localIdentifier 反查数据库行，
+  把该行的 `ZUUID` 与 localIdentifier 的 UUID 比对，结果写进「源图 ↔ 新资产」表。
+  不吻合、或走了"最新一行"兜底定位的，会标橙提醒先人工核对
+- 每张记一条：源图原始文件名、新资产 localIdentifier、解析到的 `Z_PK`、新文件名、
+  `ZKINDSUBTYPE` 变化前后、UUID 是否吻合
+
 ### 依据
 
 `ZKINDSUBTYPE = 10` 的含义出自社区取证查询库
