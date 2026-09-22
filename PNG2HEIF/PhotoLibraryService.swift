@@ -807,7 +807,7 @@ final class PhotoLibraryService: ObservableObject {
     /// 一次完整的「导出 PNG → 解码 → 编码 HEIC」，针对一个具体目录
     private func attemptEncode(resource: PHAssetResource,
                                directory: URL,
-                               quality: Double) -> (url: URL?, failure: String?) {
+                               quality: Float) -> (url: URL?, failure: String?) {
         let inputURL = directory.appendingPathComponent(UUID().uuidString + ".png")
         let outputURL = directory.appendingPathComponent(UUID().uuidString + ".heic")
 
