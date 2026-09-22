@@ -1,6 +1,43 @@
 import SwiftUI
 import Photos
+import PhotosUI
 import UniformTypeIdentifiers
+
+// MARK: - In-app photo picker
+
+/// 应用内选图。用 PHPicker（在进程内运行，不需要额外授权弹窗）。
+/// configuration 带 `photoLibrary: .shared()` 才会有 `assetIdentifier` ——
+/// 靠它把选中的图对应回 PHAsset，后面才能按 localIdentifier 在 Photos.sqlite 里找到对应的行。
+struct PhotoPicker: UIViewControllerRepresentable {
+    let onPick: ([String]) -> Void
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var configuration = PHPickerConfiguration(photoLibrary: .shared())
+        configuration.filter = .images
+        configuration.selectionLimit = 0                                    // 0 = 不限张数
+        configuration.preferredAssetRepresentationMode = .current           // 不要重新编码
+        let picker = PHPickerViewController(configuration: configuration)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+    class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let onPick: ([String]) -> Void
+        init(onPick: @escaping ([String]) -> Void) { self.onPick = onPick }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            picker.dismiss(animated: true)
+            // 没有 assetIdentifier 的那些（例如从 iCloud 分享进来的）会被丢掉，
+            // 这里如实报数量，别让人以为全都选上了。
+            let identifiers = results.compactMap { $0.assetIdentifier }
+            onPick(identifiers)
+        }
+    }
+}
 
 // MARK: - Folder Picker
 
@@ -42,7 +79,18 @@ struct ContentView: View {
     @AppStorage("deleteOriginals") private var deleteOriginals = false
     @AppStorage("writeScreenshotSubtype") private var writeScreenshotSubtype = false
     @State private var showFolderPicker = false
+    @State private var showPhotoPicker = false
     @State private var showClearConfirm = false
+
+    /// 对应表里一行的说明文字
+    private func pairingDetail(_ entry: PairingEntry) -> String {
+        if let note = entry.note { return note }
+        let zpk = entry.zpk.map { "Z_PK=\($0)" } ?? "Z_PK=?"
+        let name = entry.newFilename.map { "  \($0)" } ?? ""
+        let kinds = "kind \(entry.before ?? -1) → \(entry.after ?? -1)"
+        let uuid = entry.uuidMatched ? "UUID 吻合" : "UUID 不吻合"
+        return "\(zpk)\(name)   \(kinds)   \(uuid)"
+    }
 
     private func hideKeyboard() {
         UIApplication.shared.sendAction(
@@ -331,6 +379,46 @@ struct ContentView: View {
                     }
                 }
 
+                // MARK: - 自选转换
+                Section {
+                    Button {
+                        showPhotoPicker = true
+                    } label: {
+                        Label("在图库里选择照片", systemImage: "photo.on.rectangle.angled")
+                    }
+
+                    HStack {
+                        Text("已选")
+                        Spacer()
+                        Text("\(service.selectedLocalIdentifiers.count) 张")
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                    }
+
+                    if !service.selectedLocalIdentifiers.isEmpty {
+                        Button {
+                            service.convertSelected()
+                        } label: {
+                            Label("只转换选中的 \(service.selectedLocalIdentifiers.count) 张",
+                                  systemImage: "arrow.triangle.2.circlepath")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .disabled(service.isWorking
+                                  || (service.exportMode == .folder && service.exportFolderURL == nil))
+                        .tint(.blue)
+
+                        Button("清空选择") {
+                            service.setSelection([])
+                        }
+                        .font(.footnote)
+                        .foregroundColor(.red)
+                    }
+                } header: {
+                    Text("自选转换")
+                } footer: {
+                    Text("用系统选择器在应用内挑图，只转换选中的这些，不走「扫描全部 PNG」。选中项按 localIdentifier 记住；转换后会拿「新建资产的 localIdentifier」反查 Photos.sqlite，把写入的那一行和源图对应起来 —— 对应关系与 UUID 是否吻合会显示在下面的表里。")
+                }
+
                 // MARK: - 截图标记（ZASSET.ZKINDSUBTYPE）
                 Section {
                     Text(service.subtypeProbe)
@@ -394,6 +482,28 @@ struct ContentView: View {
                     Text("Photos 的公开 API 不能设置截图类型，所以这里直接写 Photos.sqlite 的 ZASSET.ZKINDSUBTYPE：10 = 截图，0 = 普通照片。开关打开时，每张转换成功的资产会立刻写成 10。respring 或重启 Photos 之后点上面的刷新，看值有没有被系统写回。")
                 }
 
+                // MARK: - 源图 ↔ 新资产（对应表）
+                if !service.pairingLog.isEmpty {
+                    Section {
+                        ForEach(service.pairingLog) { entry in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(entry.sourceName)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                Text(pairingDetail(entry))
+                                    .font(.caption2)
+                                    .foregroundColor(entry.note == nil ? .secondary : .orange)
+                                    .lineLimit(2)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    } header: {
+                        Text("源图 ↔ 新资产（对应表）")
+                    } footer: {
+                        Text("每转换一张就记一条。UUID 吻合说明本地定位到的数据库行就是刚建的那个资产；不吻合或走了兜底定位的会标橙，先人工核对再相信写入结果。")
+                    }
+                }
+
                 // MARK: - 状态
                 Section {
                     Text(service.status)
@@ -423,6 +533,11 @@ struct ContentView: View {
                     service.exportFolderURL = url
                     service.exportFolderName = url.lastPathComponent
                     // security-scoped 权限已在 Coordinator 中启动，此处不再重复调用
+                }
+            }
+            .sheet(isPresented: $showPhotoPicker) {
+                PhotoPicker { identifiers in
+                    service.setSelection(identifiers)
                 }
             }
         }

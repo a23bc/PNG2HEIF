@@ -61,6 +61,25 @@ struct FailedItem: Identifiable {
     let timestamp: Date
 }
 
+// MARK: - Source asset ↔ new asset pairing
+
+/// 一次转换的"对应关系"：源图是哪张、在新库里落成哪一行、这一行的 ZKINDSUBTYPE 从几变成几。
+/// 用户要求"选中的照片要和 SQL 行对应起来"，所以这里把可核对的东西都留着：
+/// 源图原始文件名、新资产的 localIdentifier、数据库里的 Z_PK / 文件名，以及
+/// **新资产 localIdentifier 的 UUID 与这一行 ZUUID 是否吻合** —— 不吻合就说明可能对错了行。
+struct PairingEntry: Identifiable {
+    let id = UUID()
+    let sourceName: String
+    let sourceIdentifier: String
+    let newIdentifier: String?
+    let zpk: Int64?
+    let newFilename: String?
+    let before: Int64?
+    let after: Int64?
+    let uuidMatched: Bool
+    let note: String?
+}
+
 // MARK: - Conversion Database
 
 /// 简易文件持久化数据库，记录已转换的 asset localIdentifier。
@@ -155,6 +174,11 @@ final class PhotoLibraryService: ObservableObject {
     // 已转换记录数
     @Published var historyCount = 0
 
+    // 自选转换（应用内选择照片）
+    @Published var selectedLocalIdentifiers: [String] = []
+    /// 源图 ↔ 新资产 的对应记录，最新在前
+    @Published var pairingLog: [PairingEntry] = []
+
     // 截图标记（ZASSET.ZKINDSUBTYPE）
     /// 默认关闭：打开后，转换成功的资产会被写成截图（10）。关闭时程序行为与以前完全一致。
     @Published var writeScreenshotSubtype = false
@@ -233,23 +257,71 @@ final class PhotoLibraryService: ObservableObject {
         }
     }
 
-    /// 转换成功后调用：把刚建好的那个资产标成截图。
+    /// 转换成功后调用：把刚建好的那个资产标成截图，并记录"源图 ↔ 新资产"的对应关系。
     /// 定位不到就什么都不写，绝不去改一个来路不明的行。
-    private func markAsScreenshot(localIdentifier: String?) {
+    private func markAsScreenshot(source: PHAsset, localIdentifier: String?) {
+        let sourceName = PHAssetResource.assetResources(for: source).first?.originalFilename
+            ?? source.localIdentifier
+        let newUUID = localIdentifier?.split(separator: "/").first.map(String.init)
+
         guard let zpk = ScreenshotSubtype.findZPK(localIdentifier: localIdentifier) else {
-            DispatchQueue.main.async { [weak self] in
-                self?.subtypeLastResult = "转换成功，但没在数据库里定位到刚建的资产，未写入"
-            }
+            publishPairing(PairingEntry(sourceName: sourceName,
+                                        sourceIdentifier: source.localIdentifier,
+                                        newIdentifier: localIdentifier,
+                                        zpk: nil, newFilename: nil, before: nil, after: nil,
+                                        uuidMatched: false,
+                                        note: "没在数据库里定位到新资产，未写入"))
             return
         }
-        let result = ScreenshotSubtype.setKindSubtype(ScreenshotSubtype.screenshot, zpk: zpk)
+
+        let row = ScreenshotSubtype.row(zpk: zpk)
+        // 这一行的 ZUUID 应当等于新资产 localIdentifier 的 UUID；不等就说明可能对错了行
+        let rowUUID = row?.uuid ?? ""
+        let uuidMatched = !rowUUID.isEmpty && rowUUID == newUUID
+        let note: String?
+        if localIdentifier == nil {
+            note = "localIdentifier 缺失，按「最新一行」兜底定位，请人工核对"
+        } else if !uuidMatched {
+            note = "UUID 不吻合，数据库里这一行可能不是刚建的那个资产"
+        } else {
+            note = nil
+        }
+
+        switch ScreenshotSubtype.setKindSubtype(ScreenshotSubtype.screenshot, zpk: zpk) {
+        case .success(let change):
+            DispatchQueue.main.async { [weak self] in self?.subtypeWrittenCount += 1 }
+            publishPairing(PairingEntry(sourceName: sourceName,
+                                        sourceIdentifier: source.localIdentifier,
+                                        newIdentifier: localIdentifier,
+                                        zpk: zpk,
+                                        newFilename: row?.filename,
+                                        before: change.before,
+                                        after: change.after,
+                                        uuidMatched: uuidMatched,
+                                        note: note))
+        case .failure(let error):
+            publishPairing(PairingEntry(sourceName: sourceName,
+                                        sourceIdentifier: source.localIdentifier,
+                                        newIdentifier: localIdentifier,
+                                        zpk: zpk,
+                                        newFilename: row?.filename,
+                                        before: nil, after: nil,
+                                        uuidMatched: uuidMatched,
+                                        note: "写入失败：\(error.localizedDescription)"))
+        }
+    }
+
+    private func publishPairing(_ entry: PairingEntry) {
         DispatchQueue.main.async { [weak self] in
-            switch result {
-            case .success(let change):
-                self?.subtypeWrittenCount += 1
-                self?.subtypeLastResult = "Z_PK=\(zpk)   \(change.before) → \(change.after)"
-            case .failure(let error):
-                self?.subtypeLastResult = "Z_PK=\(zpk)   写入失败：\(error.localizedDescription)"
+            guard let self = self else { return }
+            self.pairingLog.insert(entry, at: 0)
+            if self.pairingLog.count > 50 {
+                self.pairingLog.removeLast(self.pairingLog.count - 50)
+            }
+            if let note = entry.note {
+                self.subtypeLastResult = "\(entry.sourceName)：\(note)"
+            } else if let before = entry.before, let after = entry.after {
+                self.subtypeLastResult = "\(entry.sourceName) → Z_PK=\(entry.zpk ?? -1)  \(before) → \(after)"
             }
         }
     }
@@ -333,8 +405,52 @@ final class PhotoLibraryService: ObservableObject {
 
     // MARK: - Conversion Control
 
+    /// 应用内选中的照片（PHPicker 回传的 assetIdentifier）
+    func setSelection(_ identifiers: [String]) {
+        selectedLocalIdentifiers = identifiers
+        status = identifiers.isEmpty ? "未选中照片" : "已选中 \(identifiers.count) 张"
+    }
+
     func startConversion() {
-        guard !isWorking, !assets.isEmpty else { return }
+        beginConversion(with: assets)
+    }
+
+    /// 只转换用户手动选中的那几张。
+    /// 选中项按 localIdentifier 记住，这里再把它换回 PHAsset —— 顺序按用户选的顺序保留，
+    /// 这样对应表里的先后和选择一致。
+    func convertSelected() {
+        guard !isWorking else { return }
+        let identifiers = selectedLocalIdentifiers
+        guard !identifiers.isEmpty else {
+            status = "先用「选择照片」挑几张"
+            return
+        }
+
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+        var byIdentifier: [String: PHAsset] = [:]
+        fetched.enumerateObjects { asset, _, _ in byIdentifier[asset.localIdentifier] = asset }
+
+        var ordered: [PHAsset] = []
+        var missing = 0
+        for identifier in identifiers {
+            if let asset = byIdentifier[identifier] {
+                ordered.append(asset)
+            } else {
+                missing += 1
+            }
+        }
+        guard !ordered.isEmpty else {
+            status = "选中的照片已经不在图库里了"
+            return
+        }
+        if missing > 0 {
+            status = "有 \(missing) 张已不在图库，只转换剩下的 \(ordered.count) 张"
+        }
+        beginConversion(with: ordered)
+    }
+
+    private func beginConversion(with work: [PHAsset]) {
+        guard !isWorking, !work.isEmpty else { return }
 
         if exportMode == .folder, exportFolderURL == nil {
             status = "请先选择导出文件夹"
@@ -349,7 +465,6 @@ final class PhotoLibraryService: ObservableObject {
             return
         }
 
-        let work = assets
         let mode = exportMode
         let albumID = selectedAlbumID
         let albumName = newAlbumName.trimmingCharacters(in: .whitespaces)
@@ -664,7 +779,7 @@ final class PhotoLibraryService: ObservableObject {
                 convertSuccess = true
 
                 if shouldMarkScreenshot {
-                    self.markAsScreenshot(localIdentifier: createdLocalIdentifier)
+                    self.markAsScreenshot(source: asset, localIdentifier: createdLocalIdentifier)
                 }
 
                 if shouldDelete {
@@ -949,6 +1064,32 @@ enum ScreenshotSubtype {
                             addedAt: formatAddedDate(sqlite3_column_double(stmt, 5))))
         }
         return rows
+    }
+
+    /// 单行读取。定位之后要核对"这一行就是刚建的那个资产"，所以需要拿到它的 ZUUID / 文件名。
+    static func row(zpk: Int64) -> Row? {
+        let (db, _) = open(SQLITE_OPEN_READONLY)
+        guard let db = db else { return nil }
+        defer { sqlite3_close(db) }
+
+        let sql = """
+        SELECT a.Z_PK, IFNULL(a.ZFILENAME,''), IFNULL(a.ZUUID,''), IFNULL(a.ZKINDSUBTYPE,-1),
+               IFNULL(d.ZCLOUDKINDSUBTYPE,-1), IFNULL(a.ZADDEDDATE,0)
+        FROM ZASSET a
+        LEFT JOIN ZADDITIONALASSETATTRIBUTES d ON d.Z_PK = a.ZADDITIONALASSETATTRIBUTES
+        WHERE a.Z_PK = ?1
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, zpk)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return Row(zpk: sqlite3_column_int64(stmt, 0),
+                   filename: text(stmt, 1),
+                   uuid: text(stmt, 2),
+                   kindSubtype: sqlite3_column_int64(stmt, 3),
+                   cloudKindSubtype: sqlite3_column_int64(stmt, 4),
+                   addedAt: formatAddedDate(sqlite3_column_double(stmt, 5)))
     }
 
     private static func scalarInt64(_ sql: String, text value: String? = nil) -> Int64? {
