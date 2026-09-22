@@ -1,6 +1,7 @@
 import SwiftUI
 import Photos
 import PhotosUI
+import UIKit
 import UniformTypeIdentifiers
 
 // MARK: - In-app photo picker
@@ -81,6 +82,33 @@ struct ContentView: View {
     @State private var showFolderPicker = false
     @State private var showPhotoPicker = false
     @State private var showClearConfirm = false
+    @State private var copyNote: String?
+
+    /// 一键复制的诊断信息：把面板上看到的东西攒成一段文本
+    private func diagnosticsText() -> String {
+        var lines: [String] = []
+        lines.append("== 照片库数据库 ==")
+        lines.append(service.subtypeProbe)
+        if !service.environmentProbe.isEmpty {
+            lines.append("")
+            lines.append("== 运行环境 ==")
+            lines.append(service.environmentProbe)
+        }
+        lines.append("")
+        lines.append("== 选择器 ==")
+        lines.append(service.lastPickerReport.isEmpty ? "(未使用)" : service.lastPickerReport)
+        lines.append("")
+        lines.append("== 最近几行 ==")
+        for row in service.subtypeRows.prefix(12) {
+            lines.append("Z_PK=\(row.zpk) kind=\(row.kindSubtype) cloud=\(row.cloudKindSubtype) \(row.filename) \(row.addedAt)")
+        }
+        if let last = service.subtypeLastResult {
+            lines.append("")
+            lines.append("== 最近一次写入 ==")
+            lines.append(last)
+        }
+        return lines.joined(separator: "\n")
+    }
 
     /// 对应表里一行的说明文字
     private func pairingDetail(_ entry: PairingEntry) -> String {
@@ -433,13 +461,27 @@ struct ContentView: View {
                     Text(service.subtypeProbe)
                         .font(.caption2)
                         .foregroundColor(.secondary)
-                        .textSelection(.enabled)
 
                     if !service.environmentProbe.isEmpty {
                         Text(service.environmentProbe)
                             .font(.caption2)
                             .foregroundColor(.secondary)
-                            .textSelection(.enabled)
+                    }
+
+                    /* 不给文本"可选中"：长按会拉起系统编辑菜单，而在这台机器上那条路径会崩
+                       （PhotosDatabaseInspector 里定位过的 CoreImage/CI::GLContext 崩溃，栈里只有 main）。
+                       要复制就给按钮，直接写剪贴板，不经过任何菜单界面。 */
+                    Button {
+                        UIPasteboard.general.string = diagnosticsText()
+                        copyNote = "已复制到剪贴板"
+                    } label: {
+                        Label("复制以上信息", systemImage: "doc.on.doc")
+                    }
+
+                    if let copyNote = copyNote {
+                        Text(copyNote)
+                            .font(.caption2)
+                            .foregroundColor(.green)
                     }
 
                     Button {

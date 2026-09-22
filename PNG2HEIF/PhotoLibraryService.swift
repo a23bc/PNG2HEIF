@@ -414,31 +414,40 @@ final class PhotoLibraryService: ObservableObject {
 
     // MARK: - Work Directory
 
-    /// 临时文件目录：优先 App 自己的临时目录，容器不可用时退到 `/tmp/png2heif`。
+    /// 候选工作目录，按优先级排列：App 自己的临时目录优先，`/tmp/png2heif` 兜底。
     ///
-    /// 只写 `FileManager.default.temporaryDirectory` 是不够的：只要数据容器被去掉，
+    /// 只认 `FileManager.default.temporaryDirectory` 是不够的：数据容器一旦被去掉，
     /// 那个路径就不存在，表现为"每一张都转换失败"（曾经真的这样栽过一次）。
-    /// 返回实际可用的目录和一段说明，说明会显示在界面上。
-    static func resolveWorkDirectory() -> (url: URL?, detail: String) {
+    static func workDirectoryCandidates() -> [URL] {
+        [FileManager.default.temporaryDirectory, URL(fileURLWithPath: "/tmp/png2heif")]
+    }
+
+    /// 目录建得出来、而且真能写进去，才算可用
+    static func prepareDirectory(_ directory: URL) -> Bool {
         let manager = FileManager.default
+        do {
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let probe = directory.appendingPathComponent(".probe-\(UUID().uuidString)")
+            try Data("ok".utf8).write(to: probe)
+            try? manager.removeItem(at: probe)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// 给界面用的文字版结论
+    static func resolveWorkDirectory() -> (url: URL?, detail: String) {
         var notes: [String] = []
-        for candidate in [manager.temporaryDirectory, URL(fileURLWithPath: "/tmp/png2heif")] {
-            do {
-                try manager.createDirectory(at: candidate, withIntermediateDirectories: true)
-                let probe = candidate.appendingPathComponent(".probe-\(UUID().uuidString)")
-                try Data("ok".utf8).write(to: probe)
-                try? manager.removeItem(at: probe)
+        for candidate in workDirectoryCandidates() {
+            if prepareDirectory(candidate) {
                 notes.append("\(candidate.path) 可写")
                 return (candidate, notes.joined(separator: "；"))
-            } catch {
-                notes.append("\(candidate.path) 不可写（\(error.localizedDescription)）")
             }
+            notes.append("\(candidate.path) 不可写")
         }
         return (nil, notes.joined(separator: "；"))
     }
-
-    /// 本次运行选定的工作目录（解析一次）
-    private lazy var workDirectory: URL? = PhotoLibraryService.resolveWorkDirectory().url
 
     /// 上次失败的原因，给 FailedItem 用 —— 以前只在控制台 print，界面只显示"转换失败"，
     /// 排查时等于没有信息
@@ -499,16 +508,28 @@ final class PhotoLibraryService: ObservableObject {
         for identifier in identifiers {
             if let asset = byIdentifier[identifier] {
                 ordered.append(asset)
+                continue
+            }
+            // 兜底：拿标识符的第一段（UUID）再匹配一次 —— PHPicker 回传的前缀未必与
+            // PHAsset.localIdentifier 逐字一致
+            let uuid = identifier.split(separator: "/").first.map(String.init) ?? identifier
+            if let match = byIdentifier.first(where: { $0.key.hasPrefix(uuid) })?.value {
+                ordered.append(match)
             } else {
                 missing += 1
             }
         }
         guard !ordered.isEmpty else {
-            status = "选中的照片已经不在图库里了"
+            /* 定位不到就说清楚"选了几张、查到几张、首个标识符长什么样" ——
+               之前只写一句"已经不在图库里了"，等于没信息 */
+            let sample = identifiers.first ?? ""
+            lastPickerReport = "选中 \(identifiers.count) 张，按 localIdentifier 在图库里只查到 \(byIdentifier.count) 张，无法定位。首个标识符：\(sample)"
+            status = "选中的照片在图库里查不到"
             return
         }
         if missing > 0 {
-            status = "有 \(missing) 张已不在图库，只转换剩下的 \(ordered.count) 张"
+            lastPickerReport = "选中 \(identifiers.count) 张，其中 \(missing) 张查不到，转换剩下的 \(ordered.count) 张"
+            status = lastPickerReport
         }
         beginConversion(with: ordered, scope: "仅选中的 \(ordered.count) 张")
     }
@@ -732,6 +753,27 @@ final class PhotoLibraryService: ObservableObject {
 
     // MARK: - Private: Encode HEIF
 
+    /// 铺一层白底、去掉 alpha 通道再交给 HEIC 编码器。
+    /// HEIF 里没有 alpha，带 alpha 的 PNG（截图基本都带）有时会 Finalize 失败。
+    private static func flattenedForHEIC(_ image: CGImage) -> CGImage? {
+        let width = image.width
+        let height = image.height
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        guard let context = CGContext(data: nil,
+                                      width: width,
+                                      height: height,
+                                      bitsPerComponent: 8,
+                                      bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        context.setFillColor(UIColor.white.cgColor)
+        context.fill(rect)
+        context.draw(image, in: rect)
+        return context.makeImage()
+    }
+
+    /// 依次在两个候选目录里尝试（容器临时目录优先，/tmp 兜底）。
+    /// 一个目录失败就换下一个；两个都失败时把**两边的原因**都报出来。
     private func encodeHEIF(from asset: PHAsset) -> (url: URL?, pngSize: Int64) {
         lastFailureReason = nil
         let resources = PHAssetResource.assetResources(for: asset)
@@ -744,11 +786,28 @@ final class PhotoLibraryService: ObservableObject {
         }
 
         let pngSize = Int64(resource.value(forKey: "fileSize") as? Int64 ?? 0)
+        var reasons: [String] = []
 
-        guard let directory = workDirectory else {
-            lastFailureReason = "没有可写的临时目录：\(PhotoLibraryService.resolveWorkDirectory().detail)"
-            return (nil, 0)
+        for directory in PhotoLibraryService.workDirectoryCandidates() {
+            guard PhotoLibraryService.prepareDirectory(directory) else {
+                reasons.append("\(directory.path) 不可写")
+                continue
+            }
+            let attempt = attemptEncode(resource: resource,
+                                       directory: directory,
+                                       quality: compressionQuality)
+            if let url = attempt.url { return (url, pngSize) }
+            reasons.append("\(directory.path)：\(attempt.failure ?? "未知原因")")
         }
+
+        lastFailureReason = reasons.joined(separator: "；")
+        return (nil, 0)
+    }
+
+    /// 一次完整的「导出 PNG → 解码 → 编码 HEIC」，针对一个具体目录
+    private func attemptEncode(resource: PHAssetResource,
+                               directory: URL,
+                               quality: Double) -> (url: URL?, failure: String?) {
         let inputURL = directory.appendingPathComponent(UUID().uuidString + ".png")
         let outputURL = directory.appendingPathComponent(UUID().uuidString + ".heic")
 
@@ -758,7 +817,6 @@ final class PhotoLibraryService: ObservableObject {
         let semaphore = DispatchSemaphore(value: 0)
         var encodeOK = false
         var failure: String?
-        let quality = self.compressionQuality
 
         PHAssetResourceManager.default().writeData(for: resource, toFile: inputURL, options: exportOpts) { error in
             defer {
@@ -788,10 +846,22 @@ final class PhotoLibraryService: ObservableObject {
             let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
             CGImageDestinationAddImage(destination, cgImage, props as CFDictionary)
 
-            guard CGImageDestinationFinalize(destination) else {
-                failure = "HEIC 编码失败"
-                semaphore.signal()
-                return
+            /* 失败就铺白底重编一次，并把尺寸/alpha/目录写进原因 ——
+               否则下次只看到一句"编码失败"，还得再猜一轮 */
+            if !CGImageDestinationFinalize(destination) {
+                var retried = false
+                if let flattened = PhotoLibraryService.flattenedForHEIC(cgImage),
+                   let second = CGImageDestinationCreateWithURL(
+                       outputURL as CFURL, UTType.heic.identifier as CFString, 1, nil
+                   ) {
+                    CGImageDestinationAddImage(second, flattened, props as CFDictionary)
+                    retried = CGImageDestinationFinalize(second)
+                }
+                if !retried {
+                    failure = "HEIC 编码失败（\(cgImage.width)×\(cgImage.height)，alpha=\(cgImage.alphaInfo.rawValue)，目录 \(directory.path)）"
+                    semaphore.signal()
+                    return
+                }
             }
 
             encodeOK = true
@@ -801,11 +871,10 @@ final class PhotoLibraryService: ObservableObject {
         _ = semaphore.wait(timeout: .now() + 120)
 
         if encodeOK, FileManager.default.fileExists(atPath: outputURL.path) {
-            return (outputURL, pngSize)
+            return (outputURL, nil)
         }
         try? FileManager.default.removeItem(at: outputURL)
-        lastFailureReason = failure ?? "编码超时（超过 120 秒）"
-        return (nil, 0)
+        return (nil, failure ?? "编码超时（超过 120 秒）")
     }
 
     // MARK: - Private: Convert One → Photos
