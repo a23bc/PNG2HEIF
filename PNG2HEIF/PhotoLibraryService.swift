@@ -178,6 +178,12 @@ final class PhotoLibraryService: ObservableObject {
     @Published var selectedLocalIdentifiers: [String] = []
     /// 源图 ↔ 新资产 的对应记录，最新在前
     @Published var pairingLog: [PairingEntry] = []
+    /// 这次转换针对什么（全部扫描 / 仅选中的 N 张）—— 进度条上要显示，免得看错对象
+    @Published var conversionScope = ""
+    /// 运行环境自检：工作目录与 Documents 能不能写
+    @Published var environmentProbe = ""
+    /// 选择器回传情况（选了图却什么都没发生的时候，看这一行）
+    @Published var lastPickerReport = ""
 
     // 截图标记（ZASSET.ZKINDSUBTYPE）
     /// 默认关闭：打开后，转换成功的资产会被写成截图（10）。关闭时程序行为与以前完全一致。
@@ -224,13 +230,16 @@ final class PhotoLibraryService: ObservableObject {
 
     // MARK: - Screenshot Subtype
 
-    /// 刷新面板：探测数据库 + 读最近几行（重启 Photos / respring 之后点一下就知道系统有没有写回）
+    /// 刷新面板：探测数据库 + 读最近几行 + 环境自检
+    /// （重启 Photos / respring 之后点一下就知道系统有没有写回）
     func refreshSubtypePanel(limit: Int = 12) {
         workerQueue.async { [weak self] in
             let probe = ScreenshotSubtype.probe()
+            let environment = PhotoLibraryService.environmentReport()
             let rows = ScreenshotSubtype.recent(limit: limit)
             DispatchQueue.main.async {
                 self?.subtypeProbe = probe
+                self?.environmentProbe = environment
                 self?.subtypeRows = rows
             }
         }
@@ -403,16 +412,71 @@ final class PhotoLibraryService: ObservableObject {
         }
     }
 
+    // MARK: - Work Directory
+
+    /// 临时文件目录：优先 App 自己的临时目录，容器不可用时退到 `/tmp/png2heif`。
+    ///
+    /// 只写 `FileManager.default.temporaryDirectory` 是不够的：只要数据容器被去掉，
+    /// 那个路径就不存在，表现为"每一张都转换失败"（曾经真的这样栽过一次）。
+    /// 返回实际可用的目录和一段说明，说明会显示在界面上。
+    static func resolveWorkDirectory() -> (url: URL?, detail: String) {
+        let manager = FileManager.default
+        var notes: [String] = []
+        for candidate in [manager.temporaryDirectory, URL(fileURLWithPath: "/tmp/png2heif")] {
+            do {
+                try manager.createDirectory(at: candidate, withIntermediateDirectories: true)
+                let probe = candidate.appendingPathComponent(".probe-\(UUID().uuidString)")
+                try Data("ok".utf8).write(to: probe)
+                try? manager.removeItem(at: probe)
+                notes.append("\(candidate.path) 可写")
+                return (candidate, notes.joined(separator: "；"))
+            } catch {
+                notes.append("\(candidate.path) 不可写（\(error.localizedDescription)）")
+            }
+        }
+        return (nil, notes.joined(separator: "；"))
+    }
+
+    /// 本次运行选定的工作目录（解析一次）
+    private lazy var workDirectory: URL? = PhotoLibraryService.resolveWorkDirectory().url
+
+    /// 上次失败的原因，给 FailedItem 用 —— 以前只在控制台 print，界面只显示"转换失败"，
+    /// 排查时等于没有信息
+    private var lastFailureReason: String?
+
+    static func environmentReport() -> String {
+        let manager = FileManager.default
+        let work = resolveWorkDirectory()
+        var lines: [String] = []
+        lines.append("工作目录：\(work.url?.path ?? "无（两个候选都写不了）")")
+        lines.append(work.detail)
+        if let documents = manager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let probe = documents.appendingPathComponent(".probe-\(UUID().uuidString)")
+            let writable = (try? Data("ok".utf8).write(to: probe)) != nil
+            try? manager.removeItem(at: probe)
+            lines.append("Documents：\(documents.path) \(writable ? "可写" : "不可写")")
+        } else {
+            lines.append("Documents：不可用")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: - Conversion Control
 
     /// 应用内选中的照片（PHPicker 回传的 assetIdentifier）
     func setSelection(_ identifiers: [String]) {
         selectedLocalIdentifiers = identifiers
+        if identifiers.isEmpty {
+            lastPickerReport = "选择器没有回传可用标识符（assetIdentifier 为空）—— 选中的图没能对应回图库，请重试或改用「开始转换」"
+        } else {
+            let first = identifiers.first ?? ""
+            lastPickerReport = "选择器回传 \(identifiers.count) 个标识符，首个：\(first)"
+        }
         status = identifiers.isEmpty ? "未选中照片" : "已选中 \(identifiers.count) 张"
     }
 
     func startConversion() {
-        beginConversion(with: assets)
+        beginConversion(with: assets, scope: "全部扫描到的 PNG")
     }
 
     /// 只转换用户手动选中的那几张。
@@ -446,10 +510,10 @@ final class PhotoLibraryService: ObservableObject {
         if missing > 0 {
             status = "有 \(missing) 张已不在图库，只转换剩下的 \(ordered.count) 张"
         }
-        beginConversion(with: ordered)
+        beginConversion(with: ordered, scope: "仅选中的 \(ordered.count) 张")
     }
 
-    private func beginConversion(with work: [PHAsset]) {
+    private func beginConversion(with work: [PHAsset], scope: String) {
         guard !isWorking, !work.isEmpty else { return }
 
         if exportMode == .folder, exportFolderURL == nil {
@@ -477,7 +541,8 @@ final class PhotoLibraryService: ObservableObject {
         progress = 0
         totalSizeSaved = 0
         failedItems = []
-        status = "开始转换…"
+        conversionScope = scope
+        status = "开始转换（\(scope)）…"
 
         if mode == .folder {
             workerQueue.async { [weak self] in
@@ -560,7 +625,7 @@ final class PhotoLibraryService: ObservableObject {
                     fails.append(FailedItem(
                         assetLocalID: asset.localIdentifier,
                         fileName: fileName,
-                        error: "转换或写入失败",
+                        error: lastFailureReason ?? "转换或写入失败",
                         timestamp: Date()
                     ))
                 }
@@ -618,7 +683,7 @@ final class PhotoLibraryService: ObservableObject {
                     fails.append(FailedItem(
                         assetLocalID: asset.localIdentifier,
                         fileName: fileName,
-                        error: "转换或写入文件失败",
+                        error: lastFailureReason ?? "转换或写入文件失败",
                         timestamp: Date()
                     ))
                 }
@@ -668,24 +733,31 @@ final class PhotoLibraryService: ObservableObject {
     // MARK: - Private: Encode HEIF
 
     private func encodeHEIF(from asset: PHAsset) -> (url: URL?, pngSize: Int64) {
+        lastFailureReason = nil
         let resources = PHAssetResource.assetResources(for: asset)
         guard let resource = resources.first(where: {
             let uti = $0.uniformTypeIdentifier.lowercased()
             return uti == "public.png" || uti.contains("png") || $0.originalFilename.lowercased().hasSuffix(".png")
-        }) else { return (nil, 0) }
+        }) else {
+            lastFailureReason = "这张资产里没有 PNG 资源"
+            return (nil, 0)
+        }
 
         let pngSize = Int64(resource.value(forKey: "fileSize") as? Int64 ?? 0)
 
-        let inputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString + ".png")
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString + ".heic")
+        guard let directory = workDirectory else {
+            lastFailureReason = "没有可写的临时目录：\(PhotoLibraryService.resolveWorkDirectory().detail)"
+            return (nil, 0)
+        }
+        let inputURL = directory.appendingPathComponent(UUID().uuidString + ".png")
+        let outputURL = directory.appendingPathComponent(UUID().uuidString + ".heic")
 
         let exportOpts = PHAssetResourceRequestOptions()
         exportOpts.isNetworkAccessAllowed = true
 
         let semaphore = DispatchSemaphore(value: 0)
         var encodeOK = false
+        var failure: String?
         let quality = self.compressionQuality
 
         PHAssetResourceManager.default().writeData(for: resource, toFile: inputURL, options: exportOpts) { error in
@@ -693,14 +765,14 @@ final class PhotoLibraryService: ObservableObject {
                 try? FileManager.default.removeItem(at: inputURL)
             }
             if let error = error {
-                print("[PNG2HEIF] writeData 失败: \(error.localizedDescription)")
+                failure = "导出 PNG 失败：\(error.localizedDescription)"
                 semaphore.signal()
                 return
             }
 
             guard let source = CGImageSourceCreateWithURL(inputURL as CFURL, nil),
                   let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-                print("[PNG2HEIF] 解码 PNG 失败")
+                failure = "解码 PNG 失败（可能还没从 iCloud 下载完，或文件已损坏）"
                 semaphore.signal()
                 return
             }
@@ -708,7 +780,7 @@ final class PhotoLibraryService: ObservableObject {
             guard let destination = CGImageDestinationCreateWithURL(
                 outputURL as CFURL, UTType.heic.identifier as CFString, 1, nil
             ) else {
-                print("[PNG2HEIF] 创建 HEIC destination 失败")
+                failure = "无法创建 HEIC 编码器"
                 semaphore.signal()
                 return
             }
@@ -717,7 +789,7 @@ final class PhotoLibraryService: ObservableObject {
             CGImageDestinationAddImage(destination, cgImage, props as CFDictionary)
 
             guard CGImageDestinationFinalize(destination) else {
-                print("[PNG2HEIF] HEIC 编码失败")
+                failure = "HEIC 编码失败"
                 semaphore.signal()
                 return
             }
@@ -728,12 +800,12 @@ final class PhotoLibraryService: ObservableObject {
 
         _ = semaphore.wait(timeout: .now() + 120)
 
-        if encodeOK {
+        if encodeOK, FileManager.default.fileExists(atPath: outputURL.path) {
             return (outputURL, pngSize)
-        } else {
-            try? FileManager.default.removeItem(at: outputURL)
-            return (nil, 0)
         }
+        try? FileManager.default.removeItem(at: outputURL)
+        lastFailureReason = failure ?? "编码超时（超过 120 秒）"
+        return (nil, 0)
     }
 
     // MARK: - Private: Convert One → Photos
@@ -823,7 +895,7 @@ final class PhotoLibraryService: ObservableObject {
         do {
             try FileManager.default.copyItem(at: heifURL, to: finalURL)
         } catch {
-            print("[PNG2HEIF] 复制到文件夹失败: \(error.localizedDescription)")
+            lastFailureReason = "复制到所选文件夹失败：\(error.localizedDescription)（文件夹授权可能已失效，重新选一次）"
             return false
         }
 

@@ -81,6 +81,25 @@ CI 里这三步都是**硬检查**（不通过就失败）：`otool -l` 必须�
 `codesign -d --entitlements` 必须报出 `no-sandbox` 与 `platform-application`，
 并把段内容解出来打日志。构建设置写在 workflow 命令行里，`project.pbxproj` 保持不动。
 
+### 排错：转换"全都失败"是怎么来的
+
+第一版 entitlements **照抄**了 PhotosDatabaseInspector 的整套，里面有两个键
+`com.apple.private.security.container-required=false` 与 `com.apple.private.security.no-container=true`
+——它们会把 App 的**数据容器**一起去掉。而转换要往 `FileManager.default.temporaryDirectory`
+写临时 PNG/HEIC、历史记录写在 Documents 里；容器没了这些路径就不存在，
+于是**全量转换和自选转换在同一个地方一起失败**（那个项目不用临时目录，所以它没暴露这个问题）。
+现在 entitlements 里已去掉这两个键，只保留真正让数据库可达的 `no-sandbox`。
+
+代码也不再只认容器：
+
+- `resolveWorkDirectory()` 优先 App 临时目录，写不进去就退到 `/tmp/png2heif`，
+  两个都写不了才认输，并把原因显示在界面上
+- 失败**带上真实原因**：`encodeHEIF` / 复制到文件夹各自的失败点都会写进失败列表
+  （以前只在控制台 print，界面只显示"转换失败"，等于没有信息）
+- 进度条标题显示本次范围（全部扫描 / 仅选中的 N 张），免得把两次转换看混
+- 「已选」下面显示**选择器回传了几个标识符**，以及首个标识符；一张都没回传时会明说
+- 数据库面板里多一块**环境自检**：工作目录与 Documents 的路径、能不能写
+
 ### 自选转换：应用内选图 + 选图与 SQL 行对应
 
 - 「在图库里选择照片」用 `PHPickerViewController`（进程内运行，不需要额外授权弹窗）。

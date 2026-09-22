@@ -342,7 +342,9 @@ struct ContentView: View {
                             }
                         }
                     } header: {
-                        Text("处理进度")
+                        Text(service.conversionScope.isEmpty
+                             ? "处理进度"
+                             : "处理进度（\(service.conversionScope)）")
                     }
                 }
 
@@ -395,6 +397,13 @@ struct ContentView: View {
                             .monospacedDigit()
                     }
 
+                    if !service.lastPickerReport.isEmpty {
+                        Text(service.lastPickerReport)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(3)
+                    }
+
                     if !service.selectedLocalIdentifiers.isEmpty {
                         Button {
                             service.convertSelected()
@@ -425,6 +434,13 @@ struct ContentView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .textSelection(.enabled)
+
+                    if !service.environmentProbe.isEmpty {
+                        Text(service.environmentProbe)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
 
                     Button {
                         service.refreshSubtypePanel()
