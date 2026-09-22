@@ -4,6 +4,7 @@ import ImageIO
 import UniformTypeIdentifiers
 import UIKit
 import Combine
+import SQLite3
 
 // MARK: - Export Mode
 
@@ -154,6 +155,14 @@ final class PhotoLibraryService: ObservableObject {
     // 已转换记录数
     @Published var historyCount = 0
 
+    // 截图标记（ZASSET.ZKINDSUBTYPE）
+    /// 默认关闭：打开后，转换成功的资产会被写成截图（10）。关闭时程序行为与以前完全一致。
+    @Published var writeScreenshotSubtype = false
+    @Published var subtypeWrittenCount = 0
+    @Published var subtypeProbe = "点「刷新数据库状态」检查权限与文件"
+    @Published var subtypeRows: [ScreenshotSubtype.Row] = []
+    @Published var subtypeLastResult: String?
+
     // MARK: - Private
 
     private var assets: [PHAsset] = []
@@ -186,6 +195,62 @@ final class PhotoLibraryService: ObservableObject {
         albums.sort { $0.title.localizedCompare($1.title) == .orderedAscending }
         DispatchQueue.main.async { [weak self] in
             self?.userAlbums = albums
+        }
+    }
+
+    // MARK: - Screenshot Subtype
+
+    /// 刷新面板：探测数据库 + 读最近几行（重启 Photos / respring 之后点一下就知道系统有没有写回）
+    func refreshSubtypePanel(limit: Int = 12) {
+        workerQueue.async { [weak self] in
+            let probe = ScreenshotSubtype.probe()
+            let rows = ScreenshotSubtype.recent(limit: limit)
+            DispatchQueue.main.async {
+                self?.subtypeProbe = probe
+                self?.subtypeRows = rows
+            }
+        }
+    }
+
+    /// 面板上的单键写入 / 还原
+    func setSubtype(_ value: Int64, zpk: Int64) {
+        status = value == ScreenshotSubtype.screenshot ? "写入截图标记…" : "还原为普通照片…"
+        workerQueue.async { [weak self] in
+            let result = ScreenshotSubtype.setKindSubtype(value, zpk: zpk)
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let change):
+                    self?.subtypeLastResult = "Z_PK=\(zpk)   \(change.before) → \(change.after)"
+                    self?.status = change.after == value
+                        ? "已写入 \(change.after)"
+                        : "数据库里仍是 \(change.after)（可能被 Photos 写回）"
+                case .failure(let error):
+                    self?.subtypeLastResult = "Z_PK=\(zpk)   失败：\(error.localizedDescription)"
+                    self?.status = "写入失败"
+                }
+                self?.refreshSubtypePanel()
+            }
+        }
+    }
+
+    /// 转换成功后调用：把刚建好的那个资产标成截图。
+    /// 定位不到就什么都不写，绝不去改一个来路不明的行。
+    private func markAsScreenshot(localIdentifier: String?) {
+        guard let zpk = ScreenshotSubtype.findZPK(localIdentifier: localIdentifier) else {
+            DispatchQueue.main.async { [weak self] in
+                self?.subtypeLastResult = "转换成功，但没在数据库里定位到刚建的资产，未写入"
+            }
+            return
+        }
+        let result = ScreenshotSubtype.setKindSubtype(ScreenshotSubtype.screenshot, zpk: zpk)
+        DispatchQueue.main.async { [weak self] in
+            switch result {
+            case .success(let change):
+                self?.subtypeWrittenCount += 1
+                self?.subtypeLastResult = "Z_PK=\(zpk)   \(change.before) → \(change.after)"
+            case .failure(let error):
+                self?.subtypeLastResult = "Z_PK=\(zpk)   写入失败：\(error.localizedDescription)"
+            }
         }
     }
 
@@ -567,10 +632,12 @@ final class PhotoLibraryService: ObservableObject {
 
         let semaphore = DispatchSemaphore(value: 0)
         var convertSuccess = false
+        var createdLocalIdentifier: String?
 
         let loc = asset.location
         let fav = asset.isFavorite
         let shouldDelete = self.deleteOriginals
+        let shouldMarkScreenshot = self.writeScreenshotSubtype
         let heifData = try? Data(contentsOf: heifURL)
 
         guard let heifData = heifData else {
@@ -583,6 +650,7 @@ final class PhotoLibraryService: ObservableObject {
             if let loc = loc { req.location = loc }
             req.isFavorite = fav
             req.addResource(with: .photo, data: heifData, options: nil)
+            createdLocalIdentifier = req.placeholderForCreatedAsset?.localIdentifier
 
             if let album = album {
                 let placeholder = req.placeholderForCreatedAsset
@@ -594,6 +662,10 @@ final class PhotoLibraryService: ObservableObject {
         }) { changed, error in
             if changed && error == nil {
                 convertSuccess = true
+
+                if shouldMarkScreenshot {
+                    self.markAsScreenshot(localIdentifier: createdLocalIdentifier)
+                }
 
                 if shouldDelete {
                     PHPhotoLibrary.shared().performChanges({
@@ -725,5 +797,240 @@ extension FileManager {
             if !fileExists(atPath: newURL.path) { return newURL }
             counter += 1
         }
+    }
+}
+
+// MARK: - Screenshot subtype (Photos.sqlite)
+
+/// 读取 / 写入 `ZASSET.ZKINDSUBTYPE`。
+///
+/// 为什么需要它：公开 PhotoKit 不允许把新建的资产标记成"截图"，所以旧版只能自建一个普通相簿
+/// （`HEIF截图`）来管理。而 Photos 显示时真正看的是这一列：
+///
+///   0  = 普通照片
+///   2  = Live Photo
+///   10 = SpringBoard 截图（写进去相册立刻按截图显示，改回 0 就不再是截图）
+///
+/// 这条结论由 PhotosDatabaseInspector 项目在真机上验证过：把某个资产的这一列改成 10，系统相册
+/// 立刻当作截图；改回 0 又变回普通照片。映射本身出自社区取证查询库
+/// （pecca86/Photos.Sqlite_Queries），与设备上的实际行吻合。
+///
+/// 纪律：一条语句、一行、绑定参数；不做 DDL、不改 journal_mode、不 checkpoint、不 VACUUM；
+/// 写之前先读旧值以便还原。Photos 守护进程随时可能在写，冲突会返回 SQLITE_BUSY —— 原样报错，
+/// 不盲目重试。
+enum ScreenshotSubtype {
+
+    static let databasePath = "/var/mobile/Media/PhotoData/Photos.sqlite"
+    static let screenshot: Int64 = 10
+    static let stillPhoto: Int64 = 0
+
+    /// SQLITE_TRANSIENT：让 SQLite 把参数值拷进语句，Swift 没有导出这个常量
+    private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+    struct Row: Identifiable {
+        let zpk: Int64
+        let filename: String
+        let uuid: String
+        let kindSubtype: Int64
+        let cloudKindSubtype: Int64
+        let addedAt: String
+
+        var id: Int64 { zpk }
+        var isScreenshot: Bool { kindSubtype == screenshot }
+    }
+
+    enum Failure: LocalizedError {
+        case message(String)
+
+        var errorDescription: String? {
+            if case .message(let text) = self { return text }
+            return nil
+        }
+    }
+
+    // MARK: - Connection
+
+    private static func open(_ flags: Int32) -> (OpaquePointer?, String?) {
+        var handle: OpaquePointer?
+        let rc = sqlite3_open_v2(databasePath, &handle, flags | SQLITE_OPEN_FULLMUTEX, nil)
+        guard rc == SQLITE_OK, let db = handle else {
+            let detail = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "no handle"
+            if let handle = handle { sqlite3_close(handle) }
+            return (nil, "打开数据库失败 rc=\(rc)：\(detail)")
+        }
+        sqlite3_busy_timeout(db, 3000)
+        return (db, nil)
+    }
+
+    private static func text(_ stmt: OpaquePointer?, _ index: Int32) -> String {
+        guard let raw = sqlite3_column_text(stmt, index) else { return "" }
+        return String(cString: raw)
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss'Z'"
+        return formatter
+    }()
+
+    /// Core Data 的时间戳是"2001-01-01 起的秒数"
+    static func formatAddedDate(_ value: Double) -> String {
+        guard value > 0 else { return "—" }
+        return dateFormatter.string(from: Date(timeIntervalSinceReferenceDate: value))
+    }
+
+    // MARK: - Read
+
+    /// 探测：文件在不在、-wal/-shm 多大、能不能读到 ZASSET。
+    /// 权限不够时这里会直接说出来，比自己猜快。
+    static func probe() -> String {
+        var lines: [String] = [databasePath]
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: databasePath) else {
+            lines.append("文件不存在")
+            return lines.joined(separator: "\n")
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let label = suffix.isEmpty ? "main" : suffix
+            if let attrs = try? manager.attributesOfItem(atPath: databasePath + suffix),
+               let size = attrs[.size] as? NSNumber {
+                lines.append("\(label) \(size.int64Value) 字节")
+            } else {
+                lines.append("\(label) 不存在")
+            }
+        }
+
+        let (db, error) = open(SQLITE_OPEN_READONLY)
+        guard let db = db else {
+            lines.append(error ?? "打开失败")
+            return lines.joined(separator: "\n")
+        }
+        defer { sqlite3_close(db) }
+
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM ZASSET", -1, &stmt, nil) == SQLITE_OK,
+           sqlite3_step(stmt) == SQLITE_ROW {
+            lines.append("ZASSET 行数 \(sqlite3_column_int64(stmt, 0))")
+        } else {
+            lines.append("读 ZASSET 失败：\(String(cString: sqlite3_errmsg(db)))")
+        }
+        sqlite3_finalize(stmt)
+        return lines.joined(separator: "\n")
+    }
+
+    /// 最近 N 行：用来验证写入结果，也用来在 respring 之后看系统有没有把值写回去。
+    static func recent(limit: Int) -> [Row] {
+        let (db, _) = open(SQLITE_OPEN_READONLY)
+        guard let db = db else { return [] }
+        defer { sqlite3_close(db) }
+
+        let sql = """
+        SELECT a.Z_PK, IFNULL(a.ZFILENAME,''), IFNULL(a.ZUUID,''), IFNULL(a.ZKINDSUBTYPE,-1),
+               IFNULL(d.ZCLOUDKINDSUBTYPE,-1), IFNULL(a.ZADDEDDATE,0)
+        FROM ZASSET a
+        LEFT JOIN ZADDITIONALASSETATTRIBUTES d ON d.Z_PK = a.ZADDITIONALASSETATTRIBUTES
+        ORDER BY a.Z_PK DESC
+        LIMIT ?1
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(limit))
+
+        var rows: [Row] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append(Row(zpk: sqlite3_column_int64(stmt, 0),
+                            filename: text(stmt, 1),
+                            uuid: text(stmt, 2),
+                            kindSubtype: sqlite3_column_int64(stmt, 3),
+                            cloudKindSubtype: sqlite3_column_int64(stmt, 4),
+                            addedAt: formatAddedDate(sqlite3_column_double(stmt, 5))))
+        }
+        return rows
+    }
+
+    private static func scalarInt64(_ sql: String, text value: String? = nil) -> Int64? {
+        let (db, _) = open(SQLITE_OPEN_READONLY)
+        guard let db = db else { return nil }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        if let value = value { sqlite3_bind_text(stmt, 1, value, -1, transient) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(stmt, 0)
+    }
+
+    private static func readKindSubtype(_ db: OpaquePointer?, zpk: Int64) -> Int64? {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT ZKINDSUBTYPE FROM ZASSET WHERE Z_PK = ?1", -1, &stmt, nil) == SQLITE_OK else {
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, zpk)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(stmt, 0)
+    }
+
+    /// 用 PhotoKit 的 localIdentifier（形如 "UUID/L0/001"）定位刚建好的那一行。
+    /// 找不到就退回"最新一行、且是 5 分钟内添加的"；再不然返回 nil —— 宁可不写，
+    /// 也不去改一个来路不明的行。
+    static func findZPK(localIdentifier: String?) -> Int64? {
+        if let localIdentifier = localIdentifier, !localIdentifier.isEmpty {
+            let uuid = localIdentifier.split(separator: "/").first.map(String.init) ?? localIdentifier
+            if let pk = scalarInt64("SELECT Z_PK FROM ZASSET WHERE ZUUID = ?1 LIMIT 1", text: uuid) {
+                return pk
+            }
+        }
+
+        let (db, _) = open(SQLITE_OPEN_READONLY)
+        guard let db = db else { return nil }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT Z_PK, IFNULL(ZADDEDDATE,0) FROM ZASSET ORDER BY Z_PK DESC LIMIT 1", -1, &stmt, nil) == SQLITE_OK else {
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let pk = sqlite3_column_int64(stmt, 0)
+        let age = Date().timeIntervalSinceReferenceDate - sqlite3_column_double(stmt, 1)
+        return (age >= 0 && age < 300) ? pk : nil
+    }
+
+    // MARK: - Write（本 App 唯一的写操作）
+
+    /// 写一列、一行，返回 (旧值, 新值)。先读旧值是为了能还原。
+    static func setKindSubtype(_ value: Int64, zpk: Int64) -> Result<(before: Int64, after: Int64), Failure> {
+        let (db, error) = open(SQLITE_OPEN_READWRITE)
+        guard let db = db else {
+            return .failure(.message(error ?? "打开数据库失败"))
+        }
+        defer { sqlite3_close(db) }
+
+        guard let before = readKindSubtype(db, zpk: zpk) else {
+            return .failure(.message("ZASSET 里没有 Z_PK=\(zpk) 这一行"))
+        }
+        if before == value {
+            return .success((before, before))
+        }
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE \"ZASSET\" SET ZKINDSUBTYPE = ?1 WHERE Z_PK = ?2", -1, &stmt, nil) == SQLITE_OK else {
+            return .failure(.message("准备更新失败：\(String(cString: sqlite3_errmsg(db)))"))
+        }
+        sqlite3_bind_int64(stmt, 1, value)
+        sqlite3_bind_int64(stmt, 2, zpk)
+        let rc = sqlite3_step(stmt)
+        sqlite3_finalize(stmt)
+
+        guard rc == SQLITE_DONE else {
+            return .failure(.message("更新失败 rc=\(rc)：\(String(cString: sqlite3_errmsg(db)))"))
+        }
+
+        // 回读：报告里要给数据库现在真正持有的值，而不是我们请求的值
+        let after = readKindSubtype(db, zpk: zpk) ?? before
+        return .success((before, after))
     }
 }

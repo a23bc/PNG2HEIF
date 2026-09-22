@@ -40,6 +40,7 @@ struct FolderPicker: UIViewControllerRepresentable {
 struct ContentView: View {
     @StateObject private var service = PhotoLibraryService()
     @AppStorage("deleteOriginals") private var deleteOriginals = false
+    @AppStorage("writeScreenshotSubtype") private var writeScreenshotSubtype = false
     @State private var showFolderPicker = false
     @State private var showClearConfirm = false
 
@@ -207,6 +208,11 @@ struct ContentView: View {
                             service.deleteOriginals = newValue
                         }
 
+                    Toggle("转换后写入截图标记（ZKINDSUBTYPE=10）", isOn: $writeScreenshotSubtype)
+                        .onChange(of: writeScreenshotSubtype) { newValue in
+                            service.writeScreenshotSubtype = newValue
+                        }
+
                     if #available(iOS 15, *) {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
@@ -325,6 +331,69 @@ struct ContentView: View {
                     }
                 }
 
+                // MARK: - 截图标记（ZASSET.ZKINDSUBTYPE）
+                Section {
+                    Text(service.subtypeProbe)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+
+                    Button {
+                        service.refreshSubtypePanel()
+                    } label: {
+                        Label("刷新数据库状态", systemImage: "arrow.clockwise")
+                    }
+
+                    if let last = service.subtypeLastResult {
+                        Text(last)
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    }
+
+                    if !service.subtypeRows.isEmpty {
+                        ForEach(service.subtypeRows) { row in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 8) {
+                                    Text(row.isScreenshot ? "截图" : "照片")
+                                        .font(.caption2)
+                                        .foregroundColor(row.isScreenshot ? .green : .secondary)
+                                    Text("kind=\(row.kindSubtype)")
+                                        .font(.caption2)
+                                        .monospacedDigit()
+                                        .foregroundColor(.secondary)
+                                    Text("cloud=\(row.cloudKindSubtype)")
+                                        .font(.caption2)
+                                        .monospacedDigit()
+                                        .foregroundColor(.secondary)
+                                    Text("Z_PK=\(row.zpk)")
+                                        .font(.caption2)
+                                        .monospacedDigit()
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                }
+                                Text("\(row.filename)   \(row.addedAt)")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                HStack(spacing: 14) {
+                                    Button("设为截图 10") { service.setSubtype(10, zpk: row.zpk) }
+                                        .font(.caption2)
+                                        .buttonStyle(.borderless)
+                                    Button("还原 0") { service.setSubtype(0, zpk: row.zpk) }
+                                        .font(.caption2)
+                                        .buttonStyle(.borderless)
+                                        .foregroundColor(.red)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                } header: {
+                    Text("截图标记（数据库）")
+                } footer: {
+                    Text("Photos 的公开 API 不能设置截图类型，所以这里直接写 Photos.sqlite 的 ZASSET.ZKINDSUBTYPE：10 = 截图，0 = 普通照片。开关打开时，每张转换成功的资产会立刻写成 10。respring 或重启 Photos 之后点上面的刷新，看值有没有被系统写回。")
+                }
+
                 // MARK: - 状态
                 Section {
                     Text(service.status)
@@ -338,7 +407,9 @@ struct ContentView: View {
             .navigationTitle("PNG \u{2192} HEIF")
             .onAppear {
                 service.deleteOriginals = deleteOriginals
+                service.writeScreenshotSubtype = writeScreenshotSubtype
                 service.requestAuthorizationAndScan()
+                service.refreshSubtypePanel()
             }
             .alert(item: $service.alert) { item in
                 Alert(
