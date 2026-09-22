@@ -2,6 +2,9 @@
 build/
 DerivedData/
 
+# 本地 agent 工作记录（不是项目产物）
+.workbuddy/
+
 .DS_Store
 xcuserdata/
 *.xcuserstate
