@@ -1,0 +1,7 @@
+# 本地产物与构建残留：留在磁盘上，不提交
+build/
+DerivedData/
+
+.DS_Store
+xcuserdata/
+*.xcuserstate
