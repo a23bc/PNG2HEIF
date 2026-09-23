@@ -1801,36 +1801,64 @@ enum HEIFWriter {
         box(type, u8(0) + Data([0, 0, 0]) + payload)
     }
 
-    /// 容器写法的变体。默认那套是本机 ImageIO **解不开**的版本（自检实测），
-    /// 所以这里把可疑的开关都做成参数，让设备自己把组合试出来。
+    /// 容器写法的变体。默认那套是本机 ImageIO **解不开**的版本（自检实测 7 个组合全 ✗），
+    /// 所以把开关都做成参数，让设备自己去试。
+    ///
+    /// 参照物：用户从设备导出的系统 HEIC（IMG_5690.HEIC，相机拍的 4032×3024）实测结构为
+    ///   meta 子盒顺序 hdlr, dinf, pitm, iinf, iref, iprp, idat, iloc（**iloc 在最后**）
+    ///   ipma 里 ispe / colr / hvcC **三者都标 essential**
+    ///   hvcC 的 general_profile_idc = **3（Main Still Picture）**，而 VideoToolbox 给的是 Main
+    ///   ftyp 兼容品牌 mif1, MiPr, miaf, MiHB, heic（五个）
     struct Variant {
         let label: String
         let ispeEssential: Bool
+        let colrEssential: Bool
         let itemType: String
         let includeColr: Bool
         let includePixi: Bool
         let lengthPrefixed: Bool
+        let includeDinf: Bool
+        let ilocLast: Bool
+        let markMainStill: Bool
+        let appleBrands: Bool
 
-        static let defaultVariant = Variant(label: "hvcC essential（现状）",
-                                            ispeEssential: false, itemType: "hvc1",
-                                            includeColr: true, includePixi: true,
-                                            lengthPrefixed: true)
+        /// 旧布局（只标 hvcC essential）—— 留作对照，自检里也保留
+        static let legacyVariant = Variant(label: "旧布局（只标 hvcC essential，对照）",
+                                           ispeEssential: false, colrEssential: false,
+                                           itemType: "hvc1", includeColr: true, includePixi: true,
+                                           lengthPrefixed: true, includeDinf: false, ilocLast: false,
+                                           markMainStill: false, appleBrands: false)
 
-        /// 自检里逐个回读的组合
+        /// 转换路径默认就用 Apple 式：既然实测是本机 ImageIO 解不开旧布局，
+        /// 那就没有再拿旧布局去导入的道理
+        static let defaultVariant = Variant(label: "Apple 式全套（dinf + iloc 后置 + ispe/colr/hvcC essential + MSP + 五个品牌）", ispeEssential: true, colrEssential: true,
+                                            itemType: "hvc1", includeColr: true, includePixi: true,
+                                            lengthPrefixed: true, includeDinf: true, ilocLast: true,
+                                            markMainStill: true, appleBrands: true)
+
+        /// 照 Apple 那个文件的结构全套照做
+        static let appleLike = Variant(label: "Apple 式全套（dinf + iloc 后置 + ispe/colr/hvcC essential + MSP + 五个品牌）",
+                                       ispeEssential: true, colrEssential: true,
+                                       itemType: "hvc1", includeColr: true, includePixi: true,
+                                       lengthPrefixed: true, includeDinf: true, ilocLast: true,
+                                       markMainStill: true, appleBrands: true)
+
+        /// 自检里逐个回读的组合：先试最可能的，再拆开单项定位
         static let candidates: [Variant] = [
-            defaultVariant,
-            Variant(label: "＋ispe essential", ispeEssential: true, itemType: "hvc1",
-                    includeColr: true, includePixi: true, lengthPrefixed: true),
-            Variant(label: "只 essential 的 ispe+hvcC，无 colr/pixi", ispeEssential: true, itemType: "hvc1",
-                    includeColr: false, includePixi: false, lengthPrefixed: true),
-            Variant(label: "无 colr", ispeEssential: false, itemType: "hvc1",
-                    includeColr: false, includePixi: true, lengthPrefixed: true),
-            Variant(label: "无 pixi", ispeEssential: false, itemType: "hvc1",
-                    includeColr: true, includePixi: false, lengthPrefixed: true),
-            Variant(label: "item type hev1", ispeEssential: false, itemType: "hev1",
-                    includeColr: true, includePixi: true, lengthPrefixed: true),
-            Variant(label: "码流不带长度前缀", ispeEssential: false, itemType: "hvc1",
-                    includeColr: true, includePixi: true, lengthPrefixed: false)
+            appleLike,
+            Variant(label: "只把 hvcC 标成 MSP（Main Still Picture）", ispeEssential: false, colrEssential: false,
+                    itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
+                    includeDinf: false, ilocLast: false, markMainStill: true, appleBrands: false),
+            Variant(label: "Apple 式布局，但不动 profile", ispeEssential: true, colrEssential: true,
+                    itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
+                    includeDinf: true, ilocLast: true, markMainStill: false, appleBrands: true),
+            Variant(label: "只补 dinf + iloc 后置", ispeEssential: false, colrEssential: false,
+                    itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
+                    includeDinf: true, ilocLast: true, markMainStill: false, appleBrands: false),
+            Variant(label: "只把 ispe + colr 也标 essential", ispeEssential: true, colrEssential: true,
+                    itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
+                    includeDinf: false, ilocLast: false, markMainStill: false, appleBrands: false),
+            legacyVariant
         ]
     }
 
@@ -1849,41 +1877,54 @@ enum HEIFWriter {
         return out.isEmpty ? data : out
     }
 
+    /// hvcC 第 1 个字节（configurationVersion 之后）是 general_profile_space(2) | tier(1) | profile_idc(5)。
+    /// 单帧静止图本来就符合 Main Still Picture 的语义，所以把 idc 标成 3 是如实声明 ——
+    /// Apple 自己的 HEIC 也是 idc=3，而 VideoToolbox 给的是 Main(1)。
+    private static func markMainStillPicture(_ config: Data) -> Data {
+        guard config.count > 2 else { return config }
+        var patched = config
+        let index = patched.startIndex + 1
+        patched[index] = (patched[index] & 0xE0) | 0x03
+        return patched
+    }
+
     static func buildContainer(width: Int, height: Int, itemData: Data, hvcC: Data,
                                variant: Variant = .defaultVariant) -> Data {
-        let ftyp = box("ftyp", "heic".data(using: .ascii)! + u32(0) + "mif1".data(using: .ascii)!
-            + "heic".data(using: .ascii)!)
+        // Apple 的 ftyp：major heic，兼容品牌五个
+        var brands = u32(0) + "mif1".data(using: .ascii)! + "heic".data(using: .ascii)!
+        if variant.appleBrands {
+            brands = u32(0) + "mif1".data(using: .ascii)! + "MiPr".data(using: .ascii)!
+                + "miaf".data(using: .ascii)! + "MiHB".data(using: .ascii)!
+                + "heic".data(using: .ascii)!
+        }
+        let ftyp = box("ftyp", "heic".data(using: .ascii)! + brands)
 
         let ispe = fullBox("ispe", u32(UInt32(width)) + u32(UInt32(height)))
-        let hvcCBox = box("hvcC", hvcC)
+        let config = variant.markMainStill ? markMainStillPicture(hvcC) : hvcC
+        let hvcCBox = box("hvcC", config)
         // nclx：BT.709 primaries / sRGB transfer / BT.709 matrix / full range
         let colr = box("colr", "nclx".data(using: .ascii)! + u16(1) + u16(13) + u16(1) + u8(0x80))
         let pixi = fullBox("pixi", u8(3) + u8(8) + u8(8) + u8(8))
 
-        /* 组装 ipco，并记住每个属性在里面的序号 —— hvcC 必须标 essential
-           （ffmpeg 自己 mux 的 AVIF 对 av1C 就是这么做的），ispe 是否要标由变体决定 */
-        var properties: [Data] = []
-        var ispeIndex: UInt8 = 0
-        var hvcCIndex: UInt8 = 0
-        var others: [UInt8] = []
-
-        properties.append(ispe)
-        ispeIndex = UInt8(properties.count)
-        properties.append(hvcCBox)
-        hvcCIndex = UInt8(properties.count)
+        var properties: [Data] = [ispe, hvcCBox]
+        let ispeIndex: UInt8 = 1
+        let hvcCIndex: UInt8 = 2
+        var others: [(UInt8, Bool)] = []      // (index, essential)
         if variant.includeColr {
             properties.append(colr)
-            others.append(UInt8(properties.count))
+            others.append((UInt8(properties.count), variant.colrEssential))
         }
         if variant.includePixi {
             properties.append(pixi)
-            others.append(UInt8(properties.count))
+            others.append((UInt8(properties.count), false))
         }
 
         var associations: [UInt8] = []
         associations.append(variant.ispeEssential ? (0x80 | ispeIndex) : ispeIndex)
         associations.append(0x80 | hvcCIndex)
-        associations.append(contentsOf: others)
+        for (index, essential) in others {
+            associations.append(essential ? (0x80 | index) : index)
+        }
 
         let ipco = box("ipco", properties.reduce(Data(), +))
         let ipma = fullBox("ipma", u32(1) + u16(1) + u8(UInt8(associations.count)) + Data(associations))
@@ -1893,18 +1934,27 @@ enum HEIFWriter {
         let iinf = fullBox("iinf", u16(1) + infe)
         let pitm = fullBox("pitm", u16(1))
         let hdlr = fullBox("hdlr", u32(0) + "pict".data(using: .ascii)! + Data(repeating: 0, count: 12) + u8(0))
+        // Apple 的 dinf → dref → url（flags=1 表示数据就在本文件里），逐字节照抄
+        let dinf = Data([0x00, 0x00, 0x00, 0x24, 0x64, 0x69, 0x6E, 0x66, 0x00, 0x00, 0x00, 0x1C,
+                         0x64, 0x72, 0x65, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+                         0x00, 0x00, 0x00, 0x0C, 0x75, 0x72, 0x6C, 0x20, 0x00, 0x00, 0x00, 0x01])
 
         let payload = variant.lengthPrefixed ? itemData : stripLengthPrefixes(itemData)
 
         func iloc(offset: UInt32) -> Data {
-            // offset_size=4, length_size=4 | base_offset_size=4, reserved=0
             fullBox("iloc", Data([0x44, 0x40]) + u16(1) + u16(1) + u16(0) + u32(0)
                 + u16(1) + u32(offset) + u32(UInt32(payload.count)))
         }
 
         func assemble(offset: UInt32) -> Data {
-            let meta = fullBox("meta", hdlr + pitm + iloc(offset: offset) + iinf + iprp)
-            return ftyp + meta
+            var children = hdlr
+            if variant.includeDinf { children.append(dinf) }
+            children.append(pitm)
+            if !variant.ilocLast { children.append(iloc(offset: offset)) }
+            children.append(iinf)
+            children.append(iprp)
+            if variant.ilocLast { children.append(iloc(offset: offset)) }
+            return ftyp + fullBox("meta", children)
         }
 
         // iloc 里是文件绝对偏移，所以先把 meta 量出来再定值（字段定长，长度不会变）
