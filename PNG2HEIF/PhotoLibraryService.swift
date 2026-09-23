@@ -510,24 +510,35 @@ final class PhotoLibraryService: ObservableObject {
             lines.append(PhotoLibraryService.encodeProbe(synthetic, type: .jpeg, in: directory, label: "生成图 → JPEG"))
             lines.append(PhotoLibraryService.encodeProbe(synthetic, type: .heic, in: directory, label: "生成图 → HEIC"))
 
-            let own = HEIFWriter.encode(synthetic, quality: 0.82)
-            if let data = own.data {
-                lines.append("生成图 → 自建 HEIF：通过（\(data.count) 字节）")
-                // 回读：PhotoKit 很可能也用 ImageIO 来校验/解码，这里先自己验一遍
-                let url = directory.appendingPathComponent(UUID().uuidString + ".heic")
-                if (try? data.write(to: url)) != nil {
-                    if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-                       let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-                        lines.append("自建 HEIF 回读：通过（\(decoded.width)×\(decoded.height)）")
-                    } else {
-                        lines.append("自建 HEIF 回读：失败（ImageIO 解不开我们写的文件）")
-                    }
-                    try? FileManager.default.removeItem(at: url)
-                } else {
-                    lines.append("自建 HEIF 回读：无法写入临时文件")
+            /* 一次编码、多种容器写法逐个回读 —— 让设备自己找出"Apple 认哪一种"。
+               自检实测：默认写法 ImageIO 读不回来，而系统 HEIC 读得回来，
+               所以问题在容器细节上，不在编码器。 */
+            lines.append("容器变体回读（ImageIO 能否读回）：")
+            var readableVariant: String?
+            for variant in HEIFWriter.Variant.candidates {
+                let built = HEIFWriter.encode(synthetic, quality: 0.82, variant: variant)
+                guard let data = built.data else {
+                    lines.append("  ✗ \(variant.label)：构建失败（\(built.failure ?? "未知")）")
+                    continue
                 }
+                let url = directory.appendingPathComponent(UUID().uuidString + ".heic")
+                guard (try? data.write(to: url)) != nil else {
+                    lines.append("  ✗ \(variant.label)：写文件失败")
+                    continue
+                }
+                var shape = ""
+                if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                   let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                    shape = "（\(decoded.width)×\(decoded.height)）"
+                }
+                if !shape.isEmpty, readableVariant == nil { readableVariant = variant.label }
+                lines.append("  \(shape.isEmpty ? "✗" : "✓") \(variant.label)\(shape)")
+                try? FileManager.default.removeItem(at: url)
+            }
+            if let readableVariant = readableVariant {
+                lines.append("第一个能被读回的变体：\(readableVariant)")
             } else {
-                lines.append("生成图 → 自建 HEIF：失败 — \(own.failure ?? "未知")")
+                lines.append("所有变体都读不回来 —— 不是这几个开关的差别")
             }
         } else {
             lines.append("测试图生成失败：CoreGraphics 位图上下文建不起来")
@@ -1604,7 +1615,8 @@ enum ScreenshotSubtype {
 enum HEIFWriter {
 
     /// 编码 + 封装。成功返回文件内容，失败返回人话原因。
-    static func encode(_ image: CGImage, quality: Float) -> (data: Data?, failure: String?) {
+    static func encode(_ image: CGImage, quality: Float,
+                       variant: Variant = .defaultVariant) -> (data: Data?, failure: String?) {
         let width = image.width
         let height = image.height
         guard width > 0, height > 0 else { return (nil, "尺寸无效（\(width)×\(height)）") }
@@ -1620,7 +1632,7 @@ enum HEIFWriter {
         }
         guard !stream.config.isEmpty else { return (nil, "编码器没给出 hvcC 配置") }
         return (buildContainer(width: width, height: height,
-                               itemData: stream.data, hvcC: stream.config), nil)
+                               itemData: stream.data, hvcC: stream.config, variant: variant), nil)
     }
 
     // MARK: - CGImage -> CVPixelBuffer
@@ -1789,7 +1801,56 @@ enum HEIFWriter {
         box(type, u8(0) + Data([0, 0, 0]) + payload)
     }
 
-    static func buildContainer(width: Int, height: Int, itemData: Data, hvcC: Data) -> Data {
+    /// 容器写法的变体。默认那套是本机 ImageIO **解不开**的版本（自检实测），
+    /// 所以这里把可疑的开关都做成参数，让设备自己把组合试出来。
+    struct Variant {
+        let label: String
+        let ispeEssential: Bool
+        let itemType: String
+        let includeColr: Bool
+        let includePixi: Bool
+        let lengthPrefixed: Bool
+
+        static let defaultVariant = Variant(label: "hvcC essential（现状）",
+                                            ispeEssential: false, itemType: "hvc1",
+                                            includeColr: true, includePixi: true,
+                                            lengthPrefixed: true)
+
+        /// 自检里逐个回读的组合
+        static let candidates: [Variant] = [
+            defaultVariant,
+            Variant(label: "＋ispe essential", ispeEssential: true, itemType: "hvc1",
+                    includeColr: true, includePixi: true, lengthPrefixed: true),
+            Variant(label: "只 essential 的 ispe+hvcC，无 colr/pixi", ispeEssential: true, itemType: "hvc1",
+                    includeColr: false, includePixi: false, lengthPrefixed: true),
+            Variant(label: "无 colr", ispeEssential: false, itemType: "hvc1",
+                    includeColr: false, includePixi: true, lengthPrefixed: true),
+            Variant(label: "无 pixi", ispeEssential: false, itemType: "hvc1",
+                    includeColr: true, includePixi: false, lengthPrefixed: true),
+            Variant(label: "item type hev1", ispeEssential: false, itemType: "hev1",
+                    includeColr: true, includePixi: true, lengthPrefixed: true),
+            Variant(label: "码流不带长度前缀", ispeEssential: false, itemType: "hvc1",
+                    includeColr: true, includePixi: true, lengthPrefixed: false)
+        ]
+    }
+
+    /// 把码流从"4 字节长度前缀"转成裸 NAL 串（变体用）
+    private static func stripLengthPrefixes(_ data: Data) -> Data {
+        var out = Data()
+        var offset = 0
+        while offset + 4 <= data.count {
+            let length = (Int(data[offset]) << 24) | (Int(data[offset + 1]) << 16)
+                | (Int(data[offset + 2]) << 8) | Int(data[offset + 3])
+            let start = offset + 4
+            guard length > 0, start + length <= data.count else { break }
+            out.append(data[start..<(start + length)])
+            offset = start + length
+        }
+        return out.isEmpty ? data : out
+    }
+
+    static func buildContainer(width: Int, height: Int, itemData: Data, hvcC: Data,
+                               variant: Variant = .defaultVariant) -> Data {
         let ftyp = box("ftyp", "heic".data(using: .ascii)! + u32(0) + "mif1".data(using: .ascii)!
             + "heic".data(using: .ascii)!)
 
@@ -1798,23 +1859,47 @@ enum HEIFWriter {
         // nclx：BT.709 primaries / sRGB transfer / BT.709 matrix / full range
         let colr = box("colr", "nclx".data(using: .ascii)! + u16(1) + u16(13) + u16(1) + u8(0x80))
         let pixi = fullBox("pixi", u8(3) + u8(8) + u8(8) + u8(8))
-        let ipco = box("ipco", ispe + hvcCBox + colr + pixi)
-        /* 四条属性，其中 **编解码配置（hvcC，第 2 条）必须标 essential**（低字节 0x80 | 2）。
-           ffmpeg 自己 mux 出来的 AVIF 对 av1C 就是这么做的（ipma 关联字节 01 02 83 04）；
-           四条都不带 essential 的版本被 PhotoKit 判为 PHPhotosErrorInvalidResource(3302)。
-           ispe / colr / pixi 按参考实现不带 essential。 */
-        let ipma = fullBox("ipma", u32(1) + u16(1) + u8(4) + Data([1, UInt8(0x80 | 2), 3, 4]))
+
+        /* 组装 ipco，并记住每个属性在里面的序号 —— hvcC 必须标 essential
+           （ffmpeg 自己 mux 的 AVIF 对 av1C 就是这么做的），ispe 是否要标由变体决定 */
+        var properties: [Data] = []
+        var ispeIndex: UInt8 = 0
+        var hvcCIndex: UInt8 = 0
+        var others: [UInt8] = []
+
+        properties.append(ispe)
+        ispeIndex = UInt8(properties.count)
+        properties.append(hvcCBox)
+        hvcCIndex = UInt8(properties.count)
+        if variant.includeColr {
+            properties.append(colr)
+            others.append(UInt8(properties.count))
+        }
+        if variant.includePixi {
+            properties.append(pixi)
+            others.append(UInt8(properties.count))
+        }
+
+        var associations: [UInt8] = []
+        associations.append(variant.ispeEssential ? (0x80 | ispeIndex) : ispeIndex)
+        associations.append(0x80 | hvcCIndex)
+        associations.append(contentsOf: others)
+
+        let ipco = box("ipco", properties.reduce(Data(), +))
+        let ipma = fullBox("ipma", u32(1) + u16(1) + u8(UInt8(associations.count)) + Data(associations))
         let iprp = box("iprp", ipco + ipma)
 
-        let infe = fullBox("infe", u16(1) + u16(0) + "hvc1".data(using: .ascii)! + u8(0))
+        let infe = fullBox("infe", u16(1) + u16(0) + variant.itemType.data(using: .ascii)! + u8(0))
         let iinf = fullBox("iinf", u16(1) + infe)
         let pitm = fullBox("pitm", u16(1))
         let hdlr = fullBox("hdlr", u32(0) + "pict".data(using: .ascii)! + Data(repeating: 0, count: 12) + u8(0))
 
+        let payload = variant.lengthPrefixed ? itemData : stripLengthPrefixes(itemData)
+
         func iloc(offset: UInt32) -> Data {
             // offset_size=4, length_size=4 | base_offset_size=4, reserved=0
             fullBox("iloc", Data([0x44, 0x40]) + u16(1) + u16(1) + u16(0) + u32(0)
-                + u16(1) + u32(offset) + u32(UInt32(itemData.count)))
+                + u16(1) + u32(offset) + u32(UInt32(payload.count)))
         }
 
         func assemble(offset: UInt32) -> Data {
@@ -1824,7 +1909,7 @@ enum HEIFWriter {
 
         // iloc 里是文件绝对偏移，所以先把 meta 量出来再定值（字段定长，长度不会变）
         let itemOffset = UInt32(assemble(offset: 0).count + 8)   // mdat 头 8 字节
-        return assemble(offset: itemOffset) + box("mdat", itemData)
+        return assemble(offset: itemOffset) + box("mdat", payload)
     }
 }
 
