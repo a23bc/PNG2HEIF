@@ -1503,14 +1503,13 @@ enum HEIFWriter {
             return (nil, "无法把图转成 CVPixelBuffer")
         }
 
-        switch encodeHEVC(pixelBuffer, quality: quality) {
-        case .failure(let reason):
-            return (nil, reason)
-        case .success(let stream):
-            guard !stream.config.isEmpty else { return (nil, "编码器没给出 hvcC 配置") }
-            return (buildContainer(width: width, height: height,
-                                   itemData: stream.data, hvcC: stream.config), nil)
+        let encoded = encodeHEVC(pixelBuffer, quality: quality)
+        guard let stream = encoded.stream else {
+            return (nil, encoded.reason ?? "VideoToolbox 编码失败")
         }
+        guard !stream.config.isEmpty else { return (nil, "编码器没给出 hvcC 配置") }
+        return (buildContainer(width: width, height: height,
+                               itemData: stream.data, hvcC: stream.config), nil)
     }
 
     // MARK: - CGImage -> CVPixelBuffer
@@ -1552,7 +1551,7 @@ enum HEIFWriter {
     }
 
     private static func encodeHEVC(_ pixelBuffer: CVPixelBuffer,
-                                   quality: Float) -> Result<(data: Data, config: Data), String> {
+                                   quality: Float) -> (stream: (data: Data, config: Data)?, reason: String?) {
         let width = Int32(CVPixelBufferGetWidth(pixelBuffer))
         let height = Int32(CVPixelBufferGetHeight(pixelBuffer))
 
@@ -1577,7 +1576,7 @@ enum HEIFWriter {
                                                  refcon: refcon,
                                                  compressionSessionOut: &session)
         guard created == noErr, let session = session else {
-            return .failure("VideoToolbox 创建会话失败（OSStatus \(created)）")
+            return (nil, "VideoToolbox 创建会话失败（OSStatus \(created)）")
         }
         defer { VTCompressionSessionInvalidate(session) }
 
@@ -1591,7 +1590,7 @@ enum HEIFWriter {
 
         let prepared = VTCompressionSessionPrepareToEncodeFrames(session)
         guard prepared == noErr else {
-            return .failure("VideoToolbox Prepare 失败（OSStatus \(prepared)）")
+            return (nil, "VideoToolbox Prepare 失败（OSStatus \(prepared)）")
         }
 
         let encoded = VTCompressionSessionEncodeFrame(session,
@@ -1602,31 +1601,31 @@ enum HEIFWriter {
                                                      sourceFrameRefcon: nil,
                                                      infoFlagsOut: nil)
         guard encoded == noErr else {
-            return .failure("VideoToolbox 提交帧失败（OSStatus \(encoded)）")
+            return (nil, "VideoToolbox 提交帧失败（OSStatus \(encoded)）")
         }
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
 
         guard sink.status == noErr, let sample = sink.sample else {
-            return .failure("VideoToolbox 没有输出帧（OSStatus \(sink.status)）")
+            return (nil, "VideoToolbox 没有输出帧（OSStatus \(sink.status)）")
         }
         guard let format = CMSampleBufferGetFormatDescription(sample),
               let atoms = CMFormatDescriptionGetExtension(
                   format, extensionKey: kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms
               ) as? [String: Any],
               let config = atoms["hvcC"] as? Data else {
-            return .failure("拿不到 hvcC 配置（编码器没附带 sample description）")
+            return (nil, "拿不到 hvcC 配置（编码器没附带 sample description）")
         }
         guard let block = CMSampleBufferGetDataBuffer(sample) else {
-            return .failure("编码结果为空")
+            return (nil, "编码结果为空")
         }
         var length = 0
         var pointer: UnsafeMutablePointer<Int8>?
         let read = CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil,
                                                totalLengthOut: &length, dataPointerOut: &pointer)
         guard read == kCMBlockBufferNoErr, let start = pointer, length > 0 else {
-            return .failure("读不出编码数据（OSStatus \(read)）")
+            return (nil, "读不出编码数据（OSStatus \(read)）")
         }
-        return .success((Data(bytes: start, count: length), config))
+        return ((data: Data(bytes: start, count: length), config: config), nil)
     }
 
     // MARK: - Container (same layout as the ffmpeg-verified prototype)
