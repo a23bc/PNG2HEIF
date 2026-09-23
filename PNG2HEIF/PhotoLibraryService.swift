@@ -1174,8 +1174,11 @@ final class PhotoLibraryService: ObservableObject {
                 if changed && error == nil {
                     createdLocalIdentifier = identifier
                 } else {
-                    failure = error.map { "\($0.domain) \($0.code)：\($0.localizedDescription)" }
-                        ?? "no error object, changed=\(changed)"
+                    if let error = error as NSError? {
+                        failure = "\(error.domain) \(error.code)：\(error.localizedDescription)"
+                    } else {
+                        failure = "没有错误对象，changed=\(changed)"
+                    }
                 }
                 attemptSemaphore.signal()
             }
@@ -1200,7 +1203,7 @@ final class PhotoLibraryService: ObservableObject {
                 PHAssetChangeRequest.deleteAssets([asset] as NSArray)
             }) { deleted, error in
                 if !deleted {
-                    lastFailureReason = "导入成功，但删除原 PNG 失败："
+                    self.lastFailureReason = "导入成功，但删除原 PNG 失败："
                         + (error.map { $0.localizedDescription } ?? "未知原因")
                     convertSuccess = false
                 }
