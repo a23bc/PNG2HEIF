@@ -2,6 +2,9 @@
 build/
 DerivedData/
 
+# 设备日志（崩溃报告等）：本地证据，不入库
+logs/
+
 # 本地 agent 工作记录（不是项目产物）
 .workbuddy/
 

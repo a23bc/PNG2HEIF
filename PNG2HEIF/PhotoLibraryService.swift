@@ -1,7 +1,7 @@
 import Foundation
 import Photos
 import ImageIO
-import CoreImage
+import VideoToolbox
 import UniformTypeIdentifiers
 import UIKit
 import Combine
@@ -481,8 +481,8 @@ final class PhotoLibraryService: ObservableObject {
 
     /// 编码自检。目的：区分"编码器在这台机器上就是坏的"与"某一类图被拒"。
     /// 用**代码生成**的标准 8bit RGB 图分别试 PNG / JPEG / HEIC（三条互不相同的编码器路径），
-    /// 再拿一张真实资产的 PNG 走完整阶梯，最后探一下 CIContext
-    /// （这台机器的 CoreImage 有已知毛病：那个项目崩在 CI::GLContext）。
+    /// 再拿一张真实资产的 PNG 走完整阶梯，最后探一下 VideoToolbox 的 HEVC 编码器
+    /// （这台机器的 CoreImage 是坏的：创建 CIContext 会直接崩，详见该方法的注释）。
     func runCodecSelfTest() {
         workerQueue.async { [weak self] in
             guard let self = self else { return }
@@ -518,7 +518,7 @@ final class PhotoLibraryService: ObservableObject {
             lines.append("没找到可用于测试的 PNG 资产（先点「扫描图库」）")
         }
 
-        lines.append(PhotoLibraryService.coreImageProbe())
+        lines.append(PhotoLibraryService.videoToolboxProbe())
         return lines.joined(separator: "\n")
     }
 
@@ -558,16 +558,6 @@ final class PhotoLibraryService: ObservableObject {
         let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
         try? FileManager.default.removeItem(at: url)
         return "\(label)：\(ok ? "通过（\(size) 字节）" : "失败")"
-    }
-
-    private static func coreImageProbe() -> String {
-        let context = CIContext(options: nil)
-        let bounds = CGRect(x: 0, y: 0, width: 64, height: 64)
-        let image = CIImage(color: CIColor(red: 0.3, green: 0.6, blue: 0.2)).cropped(to: bounds)
-        guard let rendered = context.createCGImage(image, from: bounds) else {
-            return "CIContext：渲染失败（这台机器 CoreImage 有已知毛病）"
-        }
-        return "CIContext：可用（64×64 渲染成功，输出 \(rendered.width)×\(rendered.height)）"
     }
 
     // MARK: - Conversion Control
@@ -943,8 +933,10 @@ final class PhotoLibraryService: ObservableObject {
             }()
             let shape = "\(cgImage.width)×\(cgImage.height) \(cgImage.bitsPerComponent)bit/\(cgImage.bitsPerPixel)bpp alpha=\(cgImage.alphaInfo.rawValue) cs=\(spaceName)"
 
-            /* 依次试三条路，每一步用**新的输出文件名** —— 在同一个 URL 上失败过的
-               destination 会让下一个创建直接失败（上一版的重试就是这么白试的） */
+            /* 只走 ImageIO。**绝不碰 CoreImage**：这台机器上 `CIContext(options:)` 会在
+               CI::GLContext::GLContext 里空指针崩溃（2026-09-23 12:20 的崩溃日志为证），
+               之前那条 CoreImage 兜底就是这么把 App 打死的。
+               每一步用新的输出文件名 —— 失败过的 URL 会让下一个 destination 创建失败。 */
             if let url = PhotoLibraryService.writeHEIC(cgImage, in: directory, quality: quality) {
                 outputURL = url
                 semaphore.signal()
@@ -962,13 +954,6 @@ final class PhotoLibraryService: ObservableObject {
             } else {
                 reasons.append("无法重画（CGContext 位图上下文创建失败）")
             }
-
-            if let url = PhotoLibraryService.writeHEICWithCoreImage(cgImage, in: directory, quality: quality) {
-                outputURL = url
-                semaphore.signal()
-                return
-            }
-            reasons.append("Core Image 的 HEIF 编码器也失败")
 
             failure = "HEIC 编码失败：" + reasons.joined(separator: "；") + "（目录 \(directory.path)）"
             semaphore.signal()
@@ -1000,23 +985,31 @@ final class PhotoLibraryService: ObservableObject {
         return outputURL
     }
 
-    /// Core Image 的 HEIF 输出 —— 与 ImageIO 是两套不同实现，前者失败时值得一试
-    private static func writeHEICWithCoreImage(_ image: CGImage, in directory: URL, quality: Float) -> URL? {
-        let outputURL = directory.appendingPathComponent(UUID().uuidString + ".heic")
-        let options: [CIImageRepresentationOption: Any] = [
-            CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): quality
-        ]
-        do {
-            try CIContext(options: nil).writeHEIFRepresentation(of: CIImage(cgImage: image),
-                                                               to: outputURL,
-                                                               format: .RGBA8,
-                                                               colorSpace: CGColorSpaceCreateDeviceRGB(),
-                                                               options: options)
-            return outputURL
-        } catch {
-            try? FileManager.default.removeItem(at: outputURL)
-            return nil
+    /// VideoToolbox 的 HEVC 编码器能不能用。
+    /// 这是"绕开 ImageIO，自己用 VT 编 HEVC 再手工封装 HEIF"这条路的前提判断 ——
+    /// VideoToolbox 不经过 CoreImage，而 CoreImage 在这台机器上是坏的。
+    private static func videoToolboxProbe() -> String {
+        let callback: VTCompressionOutputCallback = { _, _, _, _, _ in }
+        var session: VTCompressionSession?
+        let created = VTCompressionSessionCreate(allocator: kCFAllocatorDefault,
+                                                 width: 64,
+                                                 height: 64,
+                                                 codecType: kCMVideoCodecType_HEVC,
+                                                 encoderSpecification: nil,
+                                                 imageBufferAttributes: nil,
+                                                 compressedDataAllocator: nil,
+                                                 outputCallback: callback,
+                                                 refcon: nil,
+                                                 compressionSessionOut: &session)
+        guard created == noErr, let session = session else {
+            return "VideoToolbox HEVC：创建会话失败（OSStatus \(created)）"
         }
+        let prepared = VTCompressionSessionPrepareToEncodeFrames(session)
+        VTCompressionSessionInvalidate(session)
+        if prepared == noErr {
+            return "VideoToolbox HEVC：可用（会话创建 + Prepare 都成功）"
+        }
+        return "VideoToolbox HEVC：Prepare 失败（OSStatus \(prepared)）"
     }
 
     // MARK: - Private: Convert One → Photos

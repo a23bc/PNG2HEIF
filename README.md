@@ -125,6 +125,29 @@ CI 里这三步都是**硬检查**（不通过就失败）：`otool -l` 必须�
 栈里只有 `main`）。改为一个明确的**「复制以上信息」按钮**，直接写剪贴板，
 不经过任何菜单界面 —— 顺带也更好按。
 
+### 排错三：转换闪退 —— 这台机器的 CoreImage 是坏的
+
+崩溃日志（`2026-09-23 12:20`，`EXC_BAD_ACCESS` / `KERN_INVALID_ADDRESS at 0x0`）的栈顶写得非常清楚：
+
+```
+CoreImage  CI::GLContext::GLContext(...)
+CoreImage  +[CIContext(Internal) internalContextWithEAGLContext:options:]
+CoreImage  -[CIContext initWithOptions:]
+PNG2HEIF   ← 我们的代码（那条 Core Image 兜底）
+Photos     -[PHAssetResourceWriteRequest assetResourceRequest:didFinishWithError:]
+```
+
+**这台机器上创建 `CIContext` 会在 `CI::GLContext` 里空指针崩溃。** 同一个毛病在
+PhotosDatabaseInspector 里也出现过（那次是弹出键盘触发系统渲染）。所以：
+
+- 编码路径**彻底不再触碰 CoreImage** —— 那条 CoreImage 兜底已删除；`import CoreImage` 也删了
+- 自检不再创建 `CIContext`，改成探 **VideoToolbox 的 HEVC 编码器**（不经过 CoreImage）
+- **重要推论**：ImageIO 的 HEIC 编码在这台机器上失败，很可能与这个 GL 缺陷同源
+  （HEIF 编码内部要做色彩管理）。若自检确认 ImageIO 连一张代码生成的标准图都编不出 HEIC，
+  而 VideoToolbox 可用，那么下一步就是**绕开 ImageIO**：用 VT 编出 HEVC 码流再手工封装 HEIF 容器
+
+`logs/` 放设备日志（崩溃报告等），只留在本地，`.gitignore` 里已忽略。
+
 ### 自选转换：应用内选图 + 选图与 SQL 行对应
 
 - 「在图库里选择照片」用 `PHPickerViewController`（进程内运行，不需要额外授权弹窗）。
