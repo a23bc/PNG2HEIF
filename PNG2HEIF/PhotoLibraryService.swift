@@ -528,7 +528,29 @@ final class PhotoLibraryService: ObservableObject {
         }
 
         lines.append(PhotoLibraryService.videoToolboxProbe())
+        lines.append(PhotoLibraryService.pixelBufferProbe())
         return lines.joined(separator: "\n")
+    }
+
+    /// 单独探一下 CVPixelBuffer 本身：不带附加属性 vs 带 IOSurface。
+    /// 这台机器图形栈是坏的，IOSurface 可能申请不到，所以两者要分开看。
+    private static func pixelBufferProbe() -> String {
+        var plain: CVPixelBuffer?
+        let plainStatus = CVPixelBufferCreate(kCFAllocatorDefault, 64, 64,
+                                              kCVPixelFormatType_32BGRA, nil, &plain)
+        var surface: CVPixelBuffer?
+        let surfaceStatus = CVPixelBufferCreate(kCFAllocatorDefault, 64, 64,
+                                                kCVPixelFormatType_32BGRA,
+                                                [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary,
+                                                &surface)
+        var base: UnsafeMutableRawPointer?
+        if let buffer = plain {
+            CVPixelBufferLockBaseAddress(buffer, [])
+            base = CVPixelBufferGetBaseAddress(buffer)
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+        }
+        return "CVPixelBuffer：无附加属性 CVReturn=\(plainStatus)（基地址 \(base == nil ? "拿不到" : "可写")），"
+            + "带 IOSurface CVReturn=\(surfaceStatus)"
     }
 
     static func pngResource(of asset: PHAsset) -> PHAssetResource? {
@@ -1499,8 +1521,9 @@ enum HEIFWriter {
         let height = image.height
         guard width > 0, height > 0 else { return (nil, "尺寸无效（\(width)×\(height)）") }
 
-        guard let pixelBuffer = makePixelBuffer(from: image) else {
-            return (nil, "无法把图转成 CVPixelBuffer")
+        let pixels = makePixelBuffer(from: image)
+        guard let pixelBuffer = pixels.buffer else {
+            return (nil, "无法把图转成 CVPixelBuffer —— \(pixels.failure ?? "原因未知")")
         }
 
         let encoded = encodeHEVC(pixelBuffer, quality: quality)
@@ -1514,32 +1537,65 @@ enum HEIFWriter {
 
     // MARK: - CGImage -> CVPixelBuffer
 
-    private static func makePixelBuffer(from image: CGImage) -> CVPixelBuffer? {
+    /// 多组合尝试，并把**每一步的 CVReturn** 报出来。
+    /// 先试不带附加属性的普通缓冲：这台机器的图形栈是坏的（CoreImage 建 GL 上下文会崩），
+    /// 申请 IOSurface 有失败的风险，所以不能一上来就依赖它。
+    private static func makePixelBuffer(from image: CGImage) -> (buffer: CVPixelBuffer?, failure: String?) {
         let width = image.width
         let height = image.height
-        var buffer: CVPixelBuffer?
-        let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
-        let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                                         kCVPixelFormatType_32BGRA,
-                                         attributes as CFDictionary, &buffer)
-        guard status == kCVReturnSuccess, let pixelBuffer = buffer else { return nil }
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
 
-        CVPixelBufferLockBaseAddress(pixelBuffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+        let combinations: [(label: String,
+                            format: OSType,
+                            attributes: [CFString: Any]?,
+                            alpha: CGImageAlphaInfo,
+                            byteOrder: CGBitmapInfo)] = [
+            ("BGRA 无附加属性", kCVPixelFormatType_32BGRA, nil, .noneSkipFirst, .byteOrder32Little),
+            ("BGRA + IOSurface", kCVPixelFormatType_32BGRA,
+             [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary], .noneSkipFirst, .byteOrder32Little),
+            ("ARGB 无附加属性", kCVPixelFormatType_32ARGB, nil, .noneSkipFirst, .byteOrder32Big),
+            ("ARGB + IOSurface", kCVPixelFormatType_32ARGB,
+             [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary], .noneSkipFirst, .byteOrder32Big)
+        ]
 
-        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer),
-              let context = CGContext(data: base,
-                                      width: width,
-                                      height: height,
-                                      bitsPerComponent: 8,
-                                      bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
-                                      space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
-                                          | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
-        context.setFillColor(UIColor.white.cgColor)
-        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return pixelBuffer
+        var reasons: [String] = []
+        for combination in combinations {
+            var buffer: CVPixelBuffer?
+            let attributesDictionary: CFDictionary? = combination.attributes.map { $0 as CFDictionary }
+            let created = CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                              combination.format, attributesDictionary, &buffer)
+            guard created == kCVReturnSuccess, let pixelBuffer = buffer else {
+                reasons.append("\(combination.label)：CVPixelBufferCreate 失败（CVReturn \(created)）")
+                continue
+            }
+
+            let locked = CVPixelBufferLockBaseAddress(pixelBuffer, [])
+            guard locked == kCVReturnSuccess else {
+                reasons.append("\(combination.label)：LockBaseAddress 失败（CVReturn \(locked)）")
+                continue
+            }
+            defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+            guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+                reasons.append("\(combination.label)：拿不到基地址")
+                continue
+            }
+            guard let context = CGContext(data: base,
+                                          width: width,
+                                          height: height,
+                                          bitsPerComponent: 8,
+                                          bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
+                                          space: srgb,
+                                          bitmapInfo: combination.alpha.rawValue | combination.byteOrder.rawValue) else {
+                reasons.append("\(combination.label)：CGContext 创建失败")
+                continue
+            }
+            context.setFillColor(UIColor.white.cgColor)
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return (pixelBuffer, nil)
+        }
+        return (nil, reasons.joined(separator: "；"))
     }
 
     // MARK: - VideoToolbox
