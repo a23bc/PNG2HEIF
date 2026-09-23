@@ -1729,9 +1729,7 @@ enum HEIFWriter {
                                                  width: width,
                                                  height: height,
                                                  codecType: kCMVideoCodecType_HEVC,
-                                                 encoderSpecification: variant.softwareEncoder
-                                                     ? [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: false] as CFDictionary
-                                                     : nil,
+                                                 encoderSpecification: nil,
                                                  imageBufferAttributes: nil,
                                                  compressedDataAllocator: nil,
                                                  outputCallback: callback,
@@ -1831,49 +1829,43 @@ enum HEIFWriter {
         let appleBrands: Bool
         // 编码侧开关：容器试了一圈都无效，所以把嫌疑转向码流本身
         let forceKeyFrame: Bool
-        let softwareEncoder: Bool
 
         /// 旧布局（只标 hvcC essential）—— 留作对照，自检里也保留
         static let legacyVariant = Variant(label: "旧布局（只标 hvcC essential，对照）",
                                            ispeEssential: false, colrEssential: false,
                                            itemType: "hvc1", includeColr: true, includePixi: true,
                                            lengthPrefixed: true, includeDinf: false, ilocLast: false,
-                                           markMainStill: false, appleBrands: false, forceKeyFrame: true, softwareEncoder: false)
+                                           markMainStill: false, appleBrands: false, forceKeyFrame: true)
 
         /// 转换路径默认就用 Apple 式：既然实测是本机 ImageIO 解不开旧布局，
         /// 那就没有再拿旧布局去导入的道理
         static let defaultVariant = Variant(label: "Apple 式全套（dinf + iloc 后置 + ispe/colr/hvcC essential + MSP + 五个品牌）", ispeEssential: true, colrEssential: true,
                                             itemType: "hvc1", includeColr: true, includePixi: true,
                                             lengthPrefixed: true, includeDinf: true, ilocLast: true,
-                                            markMainStill: true, appleBrands: true, forceKeyFrame: true, softwareEncoder: false)
+                                            markMainStill: true, appleBrands: true, forceKeyFrame: true)
 
         /// 照 Apple 那个文件的结构全套照做
         static let appleLike = Variant(label: "Apple 式全套（dinf + iloc 后置 + ispe/colr/hvcC essential + MSP + 五个品牌）",
                                        ispeEssential: true, colrEssential: true,
                                        itemType: "hvc1", includeColr: true, includePixi: true,
                                        lengthPrefixed: true, includeDinf: true, ilocLast: true,
-                                       markMainStill: true, appleBrands: true, forceKeyFrame: true, softwareEncoder: false)
+                                       markMainStill: true, appleBrands: true, forceKeyFrame: true)
 
         /// 自检里逐个回读的组合：先试最可能的，再拆开单项定位
         static let candidates: [Variant] = [
             appleLike,
             Variant(label: "只把 hvcC 标成 MSP（Main Still Picture）", ispeEssential: false, colrEssential: false,
                     itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
-                    includeDinf: false, ilocLast: false, markMainStill: true, appleBrands: false, forceKeyFrame: true, softwareEncoder: false),
+                    includeDinf: false, ilocLast: false, markMainStill: true, appleBrands: false, forceKeyFrame: true),
             Variant(label: "Apple 式布局，但不动 profile", ispeEssential: true, colrEssential: true,
                     itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
-                    includeDinf: true, ilocLast: true, markMainStill: false, appleBrands: true, forceKeyFrame: true, softwareEncoder: false),
+                    includeDinf: true, ilocLast: true, markMainStill: false, appleBrands: true, forceKeyFrame: true),
             Variant(label: "只补 dinf + iloc 后置", ispeEssential: false, colrEssential: false,
                     itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
-                    includeDinf: true, ilocLast: true, markMainStill: false, appleBrands: false, forceKeyFrame: true, softwareEncoder: false),
+                    includeDinf: true, ilocLast: true, markMainStill: false, appleBrands: false, forceKeyFrame: true),
             Variant(label: "只把 ispe + colr 也标 essential", ispeEssential: true, colrEssential: true,
                     itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
-                    includeDinf: false, ilocLast: false, markMainStill: false, appleBrands: false, forceKeyFrame: true, softwareEncoder: false),
-            Variant(label: "Apple 式 + 软件编码器（强制关键帧）",
-                    ispeEssential: true, colrEssential: true,
-                    itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
-                    includeDinf: true, ilocLast: true, markMainStill: true, appleBrands: true,
-                    forceKeyFrame: true, softwareEncoder: true),
+                    includeDinf: false, ilocLast: false, markMainStill: false, appleBrands: false, forceKeyFrame: true),
             legacyVariant
         ]
     }
