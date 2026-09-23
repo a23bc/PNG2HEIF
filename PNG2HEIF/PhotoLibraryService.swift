@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import ImageIO
+import CoreImage
 import UniformTypeIdentifiers
 import UIKit
 import Combine
@@ -753,8 +754,9 @@ final class PhotoLibraryService: ObservableObject {
 
     // MARK: - Private: Encode HEIF
 
-    /// 铺一层白底、去掉 alpha 通道再交给 HEIC 编码器。
-    /// HEIF 里没有 alpha，带 alpha 的 PNG（截图基本都带）有时会 Finalize 失败。
+    /// 铺一层白底、重画成 8bit sRGB 并去掉 alpha 通道。
+    /// HEIF 里没有 alpha；而且 16bit / 索引 / 非标准色彩空间的 PNG 也可能被编码器拒绝，
+    /// 重画一遍能把这些一次性归到标准形态。
     private static func flattenedForHEIC(_ image: CGImage) -> CGImage? {
         let width = image.width
         let height = image.height
@@ -764,10 +766,11 @@ final class PhotoLibraryService: ObservableObject {
                                       height: height,
                                       bitsPerComponent: 8,
                                       bytesPerRow: 0,
-                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
         context.setFillColor(UIColor.white.cgColor)
         context.fill(rect)
+        context.interpolationQuality = .high
         context.draw(image, in: rect)
         return context.makeImage()
     }
@@ -809,13 +812,12 @@ final class PhotoLibraryService: ObservableObject {
                                directory: URL,
                                quality: Float) -> (url: URL?, failure: String?) {
         let inputURL = directory.appendingPathComponent(UUID().uuidString + ".png")
-        let outputURL = directory.appendingPathComponent(UUID().uuidString + ".heic")
 
         let exportOpts = PHAssetResourceRequestOptions()
         exportOpts.isNetworkAccessAllowed = true
 
         let semaphore = DispatchSemaphore(value: 0)
-        var encodeOK = false
+        var outputURL: URL?
         var failure: String?
 
         PHAssetResourceManager.default().writeData(for: resource, toFile: inputURL, options: exportOpts) { error in
@@ -835,46 +837,84 @@ final class PhotoLibraryService: ObservableObject {
                 return
             }
 
-            guard let destination = CGImageDestinationCreateWithURL(
-                outputURL as CFURL, UTType.heic.identifier as CFString, 1, nil
-            ) else {
-                failure = "无法创建 HEIC 编码器"
+            var reasons: [String] = []
+            let spaceName: String = {
+                guard let space = cgImage.colorSpace, let name = space.name else { return "?" }
+                return name as String
+            }()
+            let shape = "\(cgImage.width)×\(cgImage.height) \(cgImage.bitsPerComponent)bit/\(cgImage.bitsPerPixel)bpp alpha=\(cgImage.alphaInfo.rawValue) cs=\(spaceName)"
+
+            /* 依次试三条路，每一步用**新的输出文件名** —— 在同一个 URL 上失败过的
+               destination 会让下一个创建直接失败（上一版的重试就是这么白试的） */
+            if let url = PhotoLibraryService.writeHEIC(cgImage, in: directory, quality: quality) {
+                outputURL = url
                 semaphore.signal()
                 return
             }
+            reasons.append("原图直接编码失败（\(shape)）")
 
-            let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
-            CGImageDestinationAddImage(destination, cgImage, props as CFDictionary)
-
-            /* 失败就铺白底重编一次，并把尺寸/alpha/目录写进原因 ——
-               否则下次只看到一句"编码失败"，还得再猜一轮 */
-            if !CGImageDestinationFinalize(destination) {
-                var retried = false
-                if let flattened = PhotoLibraryService.flattenedForHEIC(cgImage),
-                   let second = CGImageDestinationCreateWithURL(
-                       outputURL as CFURL, UTType.heic.identifier as CFString, 1, nil
-                   ) {
-                    CGImageDestinationAddImage(second, flattened, props as CFDictionary)
-                    retried = CGImageDestinationFinalize(second)
-                }
-                if !retried {
-                    failure = "HEIC 编码失败（\(cgImage.width)×\(cgImage.height)，alpha=\(cgImage.alphaInfo.rawValue)，目录 \(directory.path)）"
-                    semaphore.signal()
-                    return
-                }
+            if let flattened = PhotoLibraryService.flattenedForHEIC(cgImage),
+               let url = PhotoLibraryService.writeHEIC(flattened, in: directory, quality: quality) {
+                outputURL = url
+                semaphore.signal()
+                return
             }
+            reasons.append("重画成 8bit sRGB 去掉 alpha 后仍失败")
 
-            encodeOK = true
+            if let url = PhotoLibraryService.writeHEICWithCoreImage(cgImage, in: directory, quality: quality) {
+                outputURL = url
+                semaphore.signal()
+                return
+            }
+            reasons.append("Core Image 的 HEIF 编码器也失败")
+
+            failure = "HEIC 编码失败：" + reasons.joined(separator: "；") + "（目录 \(directory.path)）"
             semaphore.signal()
         }
 
         _ = semaphore.wait(timeout: .now() + 120)
 
-        if encodeOK, FileManager.default.fileExists(atPath: outputURL.path) {
+        if let outputURL = outputURL, FileManager.default.fileExists(atPath: outputURL.path) {
             return (outputURL, nil)
         }
-        try? FileManager.default.removeItem(at: outputURL)
         return (nil, failure ?? "编码超时（超过 120 秒）")
+    }
+
+    /// 用 ImageIO 把一张图编成 HEIC 写到指定目录，成功返回文件 URL。
+    /// 每次都用新的输出文件名，绝不复用失败过的路径。
+    private static func writeHEIC(_ image: CGImage, in directory: URL, quality: Float) -> URL? {
+        let outputURL = directory.appendingPathComponent(UUID().uuidString + ".heic")
+        guard let destination = CGImageDestinationCreateWithURL(
+            outputURL as CFURL, UTType.heic.identifier as CFString, 1, nil
+        ) else { return nil }
+
+        let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
+        CGImageDestinationAddImage(destination, image, props as CFDictionary)
+
+        guard CGImageDestinationFinalize(destination) else {
+            try? FileManager.default.removeItem(at: outputURL)
+            return nil
+        }
+        return outputURL
+    }
+
+    /// Core Image 的 HEIF 输出 —— 与 ImageIO 是两套不同实现，前者失败时值得一试
+    private static func writeHEICWithCoreImage(_ image: CGImage, in directory: URL, quality: Float) -> URL? {
+        let outputURL = directory.appendingPathComponent(UUID().uuidString + ".heic")
+        let options: [CIImageRepresentationOption: Any] = [
+            CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): quality
+        ]
+        do {
+            try CIContext(options: nil).writeHEIFRepresentation(of: CIImage(cgImage: image),
+                                                               to: outputURL,
+                                                               format: .RGBA8,
+                                                               colorSpace: CGColorSpaceCreateDeviceRGB(),
+                                                               options: options)
+            return outputURL
+        } catch {
+            try? FileManager.default.removeItem(at: outputURL)
+            return nil
+        }
     }
 
     // MARK: - Private: Convert One → Photos
