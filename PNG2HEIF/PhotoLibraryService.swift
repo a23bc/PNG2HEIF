@@ -1890,14 +1890,16 @@ enum HEIFWriter {
 
     static func buildContainer(width: Int, height: Int, itemData: Data, hvcC: Data,
                                variant: Variant = .defaultVariant) -> Data {
-        // Apple 的 ftyp：major heic，兼容品牌五个
-        var brands = u32(0) + "mif1".data(using: .ascii)! + "heic".data(using: .ascii)!
-        if variant.appleBrands {
-            brands = u32(0) + "mif1".data(using: .ascii)! + "MiPr".data(using: .ascii)!
-                + "miaf".data(using: .ascii)! + "MiHB".data(using: .ascii)!
-                + "heic".data(using: .ascii)!
+        // Apple 的 ftyp：major heic，兼容品牌五个（旧布局只用两个）——
+        // 拆成循环写，Swift 的类型检查器会被一长串 `Data + Data` 拖垮（CI 实测）
+        let compatibleBrands: [String] = variant.appleBrands
+            ? ["mif1", "MiPr", "miaf", "MiHB", "heic"]
+            : ["mif1", "heic"]
+        var brandBytes = u32(0)
+        for brand in compatibleBrands {
+            if let encoded = brand.data(using: .ascii) { brandBytes.append(encoded) }
         }
-        let ftyp = box("ftyp", "heic".data(using: .ascii)! + brands)
+        let ftyp = box("ftyp", "heic".data(using: .ascii)! + brandBytes)
 
         let ispe = fullBox("ispe", u32(UInt32(width)) + u32(UInt32(height)))
         let config = variant.markMainStill ? markMainStillPicture(hvcC) : hvcC
