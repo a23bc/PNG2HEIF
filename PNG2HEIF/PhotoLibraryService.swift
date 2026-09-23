@@ -1799,7 +1799,11 @@ enum HEIFWriter {
         let colr = box("colr", "nclx".data(using: .ascii)! + u16(1) + u16(13) + u16(1) + u8(0x80))
         let pixi = fullBox("pixi", u8(3) + u8(8) + u8(8) + u8(8))
         let ipco = box("ipco", ispe + hvcCBox + colr + pixi)
-        let ipma = fullBox("ipma", u32(1) + u16(1) + u8(4) + Data([1, 2, 3, 4]))
+        /* 四条属性，其中 **编解码配置（hvcC，第 2 条）必须标 essential**（低字节 0x80 | 2）。
+           ffmpeg 自己 mux 出来的 AVIF 对 av1C 就是这么做的（ipma 关联字节 01 02 83 04）；
+           四条都不带 essential 的版本被 PhotoKit 判为 PHPhotosErrorInvalidResource(3302)。
+           ispe / colr / pixi 按参考实现不带 essential。 */
+        let ipma = fullBox("ipma", u32(1) + u16(1) + u8(4) + Data([1, 0x80 | 2, 3, 4]))
         let iprp = box("iprp", ipco + ipma)
 
         let infe = fullBox("infe", u16(1) + u16(0) + "hvc1".data(using: .ascii)! + u8(0))
