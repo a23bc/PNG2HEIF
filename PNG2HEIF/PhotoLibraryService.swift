@@ -579,24 +579,58 @@ final class PhotoLibraryService: ObservableObject {
                 stop.pointee = true
             }
         }
-        guard let resource = found else { return "对照：图库里没找到 HEIC 资产" }
+        guard found != nil else { return "对照：图库里没找到 HEIC 资产" }
 
-        let url = directory.appendingPathComponent(UUID().uuidString + ".heic")
-        let semaphore = DispatchSemaphore(value: 0)
-        var exported = false
-        PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: nil) { error in
-            exported = (error == nil)
-            semaphore.signal()
+        var lines: [String] = []
+        var checked = 0
+        var inspected = 0
+        let options2 = PHFetchOptions()
+        options2.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        PHAsset.fetchAssets(with: options2).enumerateObjects { asset, _, _ in
+            guard checked < 5, inspected < 300 else { return }
+            inspected += 1
+            guard let resource = PHAssetResource.assetResources(for: asset).first(where: {
+                $0.uniformTypeIdentifier.lowercased().contains("heic")
+            }) else { return }
+            checked += 1
+            let url = directory.appendingPathComponent(UUID().uuidString + ".heic")
+            let semaphore = DispatchSemaphore(value: 0)
+            var exported = false
+            PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: nil) { error in
+                exported = (error == nil)
+                semaphore.signal()
+            }
+            _ = semaphore.wait(timeout: .now() + 60)
+            defer { try? FileManager.default.removeItem(at: url) }
+            guard exported, let data = try? Data(contentsOf: url) else {
+                lines.append("  \(resource.originalFilename)：导出失败")
+                return
+            }
+            let shape = PhotoLibraryService.itemSummary(data)
+            let source = CGImageSourceCreateWithURL(url as CFURL, nil)
+            let decoded = source.flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }
+            let verdict = decoded.map { "解码通过（\($0.width)×\($0.height)）" } ?? "解码失败"
+            lines.append("  \(resource.originalFilename) \(data.count)B \(shape)：\(verdict)")
         }
-        _ = semaphore.wait(timeout: .now() + 60)
-        defer { try? FileManager.default.removeItem(at: url) }
+        return "对照（最近 \(checked) 个 HEIC）：\n" + lines.joined(separator: "\n")
+    }
 
-        guard exported else { return "对照：系统 HEIC（\(resource.originalFilename)）导出失败" }
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            return "对照：系统 HEIC（\(resource.originalFilename)）解码失败 —— 这台机器的 HEIC 解码也有问题"
+    /// 数一数文件里各类 item —— 用来区分"单 item"和"网格(grid)"结构
+    static func itemSummary(_ data: Data) -> String {
+        var counts: [String: Int] = [:]
+        let needle = Data("infe".utf8)
+        var searchStart = data.startIndex
+        while let found = data.range(of: needle, in: searchStart..<data.endIndex) {
+            let typeStart = found.lowerBound + 16          // size(4)+'infe'(4)+ver/flag(4)+item_ID(2)+protection(2)
+            if typeStart + 4 <= data.count,
+               let type = String(bytes: data[typeStart..<(typeStart + 4)], encoding: .ascii),
+               type.range(of: "^[a-zA-Z0-9 ]{4}$", options: .regularExpression) != nil {
+                counts[type, default: 0] += 1
+            }
+            searchStart = found.upperBound
         }
-        return "对照：系统 HEIC（\(resource.originalFilename)）解码通过（\(decoded.width)×\(decoded.height)）"
+        if counts.isEmpty { return "结构未知" }
+        return counts.sorted { $0.key < $1.key }.map { "\($0.value)×\($0.key)" }.joined(separator: "+")
     }
 
     /// 单独探一下 CVPixelBuffer 本身：不带附加属性 vs 带 IOSurface。
@@ -1901,11 +1935,19 @@ enum HEIFWriter {
             lines.append("     找不到 hvcC")
         }
         if let marker = data.range(of: Data("mdat".utf8)), marker.upperBound + 6 <= data.count {
-            let start = marker.upperBound
-            let length = Int(data[start]) << 24 | Int(data[start + 1]) << 16
-                | Int(data[start + 2]) << 8 | Int(data[start + 3])
-            let nalType = (Int(data[start + 4]) >> 1) & 0x3F
-            lines.append("     首个 NAL: 长度 \(length)，类型 \(nalType)（19/20=IDR、32=VPS、33=SPS、39=SEI）")
+            // 走完 mdat 里的所有 NAL —— 只有 SEI 没有 IDR 的话，文件根本解不了
+            var cursor = marker.upperBound
+            var nals: [String] = []
+            while cursor + 5 <= data.count, nals.count < 8 {
+                let length = Int(data[cursor]) << 24 | Int(data[cursor + 1]) << 16
+                    | Int(data[cursor + 2]) << 8 | Int(data[cursor + 3])
+                guard length > 0, cursor + 4 + length <= data.count else { break }
+                let nalType = (Int(data[cursor + 4]) >> 1) & 0x3F
+                nals.append("类型\(nalType)(\(length)B)")
+                cursor += 4 + length
+            }
+            lines.append("     mdat 里的 NAL: " + nals.joined(separator: ", ")
+                + "（19/20=IDR、32=VPS、33=SPS、34=PPS、39=SEI）")
         }
         return lines.joined(separator: "\n")
     }
