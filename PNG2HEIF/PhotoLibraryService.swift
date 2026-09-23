@@ -1086,6 +1086,8 @@ final class PhotoLibraryService: ObservableObject {
         let fav = asset.isFavorite
         let shouldDelete = self.deleteOriginals
         let shouldMarkScreenshot = self.writeScreenshotSubtype
+        // 在 performChanges 之前取好文件名：change 块里不适合再访问图库
+        let outputFilename = asset.originalFilenameForConversion
         let heifData = try? Data(contentsOf: heifURL)
 
         guard let heifData = heifData else {
@@ -1097,7 +1099,12 @@ final class PhotoLibraryService: ObservableObject {
             let req = PHAssetCreationRequest.forAsset()
             if let loc = loc { req.location = loc }
             req.isFavorite = fav
-            req.addResource(with: .photo, data: heifData, options: nil)
+            /* 明确告诉 PhotoKit 这是 HEIC、并给出文件名 —— 自建容器不是 Apple 产的，
+               与其让它去嗅探，不如把类型写明，导入行为更可预期 */
+            let resourceOptions = PHAssetResourceCreationOptions()
+            resourceOptions.uniformTypeIdentifier = "public.heic"
+            resourceOptions.originalFilename = outputFilename
+            req.addResource(with: .photo, data: heifData, options: resourceOptions)
             createdLocalIdentifier = req.placeholderForCreatedAsset?.localIdentifier
 
             if let album = album {
@@ -1741,5 +1748,17 @@ enum HEIFWriter {
         // iloc 里是文件绝对偏移，所以先把 meta 量出来再定值（字段定长，长度不会变）
         let itemOffset = UInt32(assemble(offset: 0).count + 8)   // mdat 头 8 字节
         return assemble(offset: itemOffset) + box("mdat", itemData)
+    }
+}
+
+// MARK: - Naming
+
+extension PHAsset {
+    /// 源 PNG 的文件名，扩展名换成 .HEIC —— 导入时告诉 PhotoKit 该叫什么名字。
+    /// 转换后的文件名会进 Photos.sqlite 的 ZFILENAME，「源图 ↔ 新资产」表靠它核对。
+    var originalFilenameForConversion: String {
+        let original = PHAssetResource.assetResources(for: self).first?.originalFilename ?? ""
+        let base = (original as NSString).deletingPathExtension
+        return (base.isEmpty ? UUID().uuidString : base) + ".HEIC"
     }
 }
