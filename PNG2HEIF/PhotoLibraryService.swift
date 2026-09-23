@@ -502,6 +502,13 @@ final class PhotoLibraryService: ObservableObject {
             lines.append(PhotoLibraryService.encodeProbe(synthetic, type: .png, in: directory, label: "生成图 → PNG "))
             lines.append(PhotoLibraryService.encodeProbe(synthetic, type: .jpeg, in: directory, label: "生成图 → JPEG"))
             lines.append(PhotoLibraryService.encodeProbe(synthetic, type: .heic, in: directory, label: "生成图 → HEIC"))
+
+            let own = HEIFWriter.encode(synthetic, quality: 0.82)
+            if let data = own.data {
+                lines.append("生成图 → 自建 HEIF：通过（\(data.count) 字节）")
+            } else {
+                lines.append("生成图 → 自建 HEIF：失败 — \(own.failure ?? "未知")")
+            }
         } else {
             lines.append("测试图生成失败：CoreGraphics 位图上下文建不起来")
         }
@@ -953,6 +960,24 @@ final class PhotoLibraryService: ObservableObject {
                 reasons.append("重画成 8bit sRGB 去掉 alpha 后编码仍失败")
             } else {
                 reasons.append("无法重画（CGContext 位图上下文创建失败）")
+            }
+
+            /* 第三条路：自己来。自检显示这台设备的 ImageIO 编不出 HEIC（连生成的干净图也失败）
+               而 VideoToolbox 可用，所以用 VT 编 HEVC + 手工封装 HEIF 容器。
+               仍然不碰 CoreImage。 */
+            let own = HEIFWriter.encode(cgImage, quality: quality)
+            if let data = own.data {
+                let targetURL = directory.appendingPathComponent(UUID().uuidString + ".heic")
+                do {
+                    try data.write(to: targetURL)
+                    outputURL = targetURL
+                    semaphore.signal()
+                    return
+                } catch {
+                    reasons.append("自建 HEIF 写文件失败：\(error.localizedDescription)")
+                }
+            } else {
+                reasons.append("自建 HEIF（VideoToolbox）失败：\(own.failure ?? "未知")")
             }
 
             failure = "HEIC 编码失败：" + reasons.joined(separator: "；") + "（目录 \(directory.path)）"

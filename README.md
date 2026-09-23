@@ -148,6 +148,33 @@ PhotosDatabaseInspector 里也出现过（那次是弹出键盘触发系统渲�
 
 `logs/` 放设备日志（崩溃报告等），只留在本地，`.gitignore` 里已忽略。
 
+### 排错四：自己写 HEIF 容器（ImageIO 的 HEIC 在这台设备上就是不可用）
+
+真机自检输出：
+
+```
+生成图 → PNG ：通过（1649 字节）
+生成图 → JPEG：通过（1969 字节）
+生成图 → HEIC：失败          ← 连代码生成的 8bit sRGB 图都编不出
+真实资产：1242×2208 16bit/64bpp alpha=3 cs=DisplayP3 —— 原图与重画都失败
+VideoToolbox HEVC：可用（会话创建 + Prepare 都成功）   ← ★ 硬件编码器是好的
+```
+
+⇒ **ImageIO 的 HEIC 编码器在这台设备上坏了**（同一张图编 PNG/JPEG 都成功），
+而 **VideoToolbox 的 HEVC 编码器可用**。所以 `HEIFWriter`（在 `Converter.swift`）自己来：
+
+```
+CGImage → CVPixelBuffer(BGRA) → VTCompressionSession(HEVC, 单帧)
+        → 按 ISO/IEC 23008-12 拼最小 HEIF：ftyp / meta(hdlr,pitm,iloc,iinf,iprp) / mdat
+```
+
+编码阶梯因此变成：ImageIO 原图 → ImageIO 重画去 alpha → **自建 HEIF**。全程不碰 CoreImage。
+
+**容器格式先在本地验证过**（`build/.tools/heif_proto.py`，放在 gitignore 的 build/ 下）：
+让 ffmpeg 的 libx265 产出真实的 hvcC 与 length-prefixed 码流，用**同一套盒子布局**写出 `.heic`，
+ffprobe 能识别（`hevc 64×64`）、ffmpeg 能完整解码回 PNG，然后才把逻辑移植到 Swift ——
+**不拿真机当编译器**。
+
 ### 自选转换：应用内选图 + 选图与 SQL 行对应
 
 - 「在图库里选择照片」用 `PHPickerViewController`（进程内运行，不需要额外授权弹窗）。
