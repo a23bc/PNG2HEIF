@@ -533,6 +533,9 @@ final class PhotoLibraryService: ObservableObject {
                 }
                 if !shape.isEmpty, readableVariant == nil { readableVariant = variant.label }
                 lines.append("  \(shape.isEmpty ? "✗" : "✓") \(variant.label)\(shape)")
+                if variant.label == HEIFWriter.Variant.candidates[0].label {
+                    lines.append(HEIFWriter.describeContainer(data))
+                }
                 try? FileManager.default.removeItem(at: url)
             }
             if let readableVariant = readableVariant {
@@ -1626,7 +1629,7 @@ enum HEIFWriter {
             return (nil, "无法把图转成 CVPixelBuffer —— \(pixels.failure ?? "原因未知")")
         }
 
-        let encoded = encodeHEVC(pixelBuffer, quality: quality)
+        let encoded = encodeHEVC(pixelBuffer, quality: quality, variant: variant)
         guard let stream = encoded.stream else {
             return (nil, encoded.reason ?? "VideoToolbox 编码失败")
         }
@@ -1707,7 +1710,8 @@ enum HEIFWriter {
     }
 
     private static func encodeHEVC(_ pixelBuffer: CVPixelBuffer,
-                                   quality: Float) -> (stream: (data: Data, config: Data)?, reason: String?) {
+                                   quality: Float,
+                                   variant: Variant) -> (stream: (data: Data, config: Data)?, reason: String?) {
         let width = Int32(CVPixelBufferGetWidth(pixelBuffer))
         let height = Int32(CVPixelBufferGetHeight(pixelBuffer))
 
@@ -1725,7 +1729,9 @@ enum HEIFWriter {
                                                  width: width,
                                                  height: height,
                                                  codecType: kCMVideoCodecType_HEVC,
-                                                 encoderSpecification: nil,
+                                                 encoderSpecification: variant.softwareEncoder
+                                                     ? [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: false] as CFDictionary
+                                                     : nil,
                                                  imageBufferAttributes: nil,
                                                  compressedDataAllocator: nil,
                                                  outputCallback: callback,
@@ -1753,7 +1759,9 @@ enum HEIFWriter {
                                                      imageBuffer: pixelBuffer,
                                                      presentationTimeStamp: CMTime(value: 0, timescale: 1),
                                                      duration: .invalid,
-                                                     frameProperties: nil,
+                                                     frameProperties: variant.forceKeyFrame
+                                                         ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
+                                                         : nil,
                                                      sourceFrameRefcon: nil,
                                                      infoFlagsOut: nil)
         guard encoded == noErr else {
@@ -1821,45 +1829,93 @@ enum HEIFWriter {
         let ilocLast: Bool
         let markMainStill: Bool
         let appleBrands: Bool
+        // 编码侧开关：容器试了一圈都无效，所以把嫌疑转向码流本身
+        let forceKeyFrame: Bool
+        let softwareEncoder: Bool
 
         /// 旧布局（只标 hvcC essential）—— 留作对照，自检里也保留
         static let legacyVariant = Variant(label: "旧布局（只标 hvcC essential，对照）",
                                            ispeEssential: false, colrEssential: false,
                                            itemType: "hvc1", includeColr: true, includePixi: true,
                                            lengthPrefixed: true, includeDinf: false, ilocLast: false,
-                                           markMainStill: false, appleBrands: false)
+                                           markMainStill: false, appleBrands: false, forceKeyFrame: true, softwareEncoder: false)
 
         /// 转换路径默认就用 Apple 式：既然实测是本机 ImageIO 解不开旧布局，
         /// 那就没有再拿旧布局去导入的道理
         static let defaultVariant = Variant(label: "Apple 式全套（dinf + iloc 后置 + ispe/colr/hvcC essential + MSP + 五个品牌）", ispeEssential: true, colrEssential: true,
                                             itemType: "hvc1", includeColr: true, includePixi: true,
                                             lengthPrefixed: true, includeDinf: true, ilocLast: true,
-                                            markMainStill: true, appleBrands: true)
+                                            markMainStill: true, appleBrands: true, forceKeyFrame: true, softwareEncoder: false)
 
         /// 照 Apple 那个文件的结构全套照做
         static let appleLike = Variant(label: "Apple 式全套（dinf + iloc 后置 + ispe/colr/hvcC essential + MSP + 五个品牌）",
                                        ispeEssential: true, colrEssential: true,
                                        itemType: "hvc1", includeColr: true, includePixi: true,
                                        lengthPrefixed: true, includeDinf: true, ilocLast: true,
-                                       markMainStill: true, appleBrands: true)
+                                       markMainStill: true, appleBrands: true, forceKeyFrame: true, softwareEncoder: false)
 
         /// 自检里逐个回读的组合：先试最可能的，再拆开单项定位
         static let candidates: [Variant] = [
             appleLike,
             Variant(label: "只把 hvcC 标成 MSP（Main Still Picture）", ispeEssential: false, colrEssential: false,
                     itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
-                    includeDinf: false, ilocLast: false, markMainStill: true, appleBrands: false),
+                    includeDinf: false, ilocLast: false, markMainStill: true, appleBrands: false, forceKeyFrame: true, softwareEncoder: false),
             Variant(label: "Apple 式布局，但不动 profile", ispeEssential: true, colrEssential: true,
                     itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
-                    includeDinf: true, ilocLast: true, markMainStill: false, appleBrands: true),
+                    includeDinf: true, ilocLast: true, markMainStill: false, appleBrands: true, forceKeyFrame: true, softwareEncoder: false),
             Variant(label: "只补 dinf + iloc 后置", ispeEssential: false, colrEssential: false,
                     itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
-                    includeDinf: true, ilocLast: true, markMainStill: false, appleBrands: false),
+                    includeDinf: true, ilocLast: true, markMainStill: false, appleBrands: false, forceKeyFrame: true, softwareEncoder: false),
             Variant(label: "只把 ispe + colr 也标 essential", ispeEssential: true, colrEssential: true,
                     itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
-                    includeDinf: false, ilocLast: false, markMainStill: false, appleBrands: false),
+                    includeDinf: false, ilocLast: false, markMainStill: false, appleBrands: false, forceKeyFrame: true, softwareEncoder: false),
+            Variant(label: "Apple 式 + 软件编码器（强制关键帧）",
+                    ispeEssential: true, colrEssential: true,
+                    itemType: "hvc1", includeColr: true, includePixi: true, lengthPrefixed: true,
+                    includeDinf: true, ilocLast: true, markMainStill: true, appleBrands: true,
+                    forceKeyFrame: true, softwareEncoder: true),
             legacyVariant
         ]
+    }
+
+
+    /// 把容器/码流的要点打印出来 —— hvcC 里的参数集、码流第一个 NAL 的类型，
+    /// 这些是 VideoToolbox 现场产生、我在这台机器上看不到的东西
+    static func describeContainer(_ data: Data) -> String {
+        var lines: [String] = []
+        if let marker = data.range(of: Data("hvcC".utf8)), marker.upperBound + 24 <= data.count {
+            let start = marker.upperBound
+            let head = data[start..<min(start + 16, data.count)]
+            lines.append("     hvcC 头: " + head.map { String(format: "%02x", $0) }.joined(separator: " "))
+            let numArrays = Int(data[start + 22])
+            var cursor = start + 23
+            var described: [String] = []
+            for _ in 0..<numArrays {
+                guard cursor + 3 <= data.count else { break }
+                let nalType = Int(data[cursor]) & 0x3F
+                let count = Int(data[cursor + 1]) << 8 | Int(data[cursor + 2])
+                cursor += 3
+                var bytes = 0
+                for _ in 0..<count {
+                    guard cursor + 2 <= data.count else { break }
+                    let length = Int(data[cursor]) << 8 | Int(data[cursor + 1])
+                    bytes += length
+                    cursor += 2 + length
+                }
+                described.append("NAL\(nalType)×\(count)(\(bytes)B)")
+            }
+            lines.append("     hvcC 参数集: " + described.joined(separator: ", "))
+        } else {
+            lines.append("     找不到 hvcC")
+        }
+        if let marker = data.range(of: Data("mdat".utf8)), marker.upperBound + 6 <= data.count {
+            let start = marker.upperBound
+            let length = Int(data[start]) << 24 | Int(data[start + 1]) << 16
+                | Int(data[start + 2]) << 8 | Int(data[start + 3])
+            let nalType = (Int(data[start + 4]) >> 1) & 0x3F
+            lines.append("     首个 NAL: 长度 \(length)，类型 \(nalType)（19/20=IDR、32=VPS、33=SPS、39=SEI）")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// 把码流从"4 字节长度前缀"转成裸 NAL 串（变体用）
