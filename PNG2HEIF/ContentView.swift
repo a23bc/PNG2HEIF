@@ -94,6 +94,11 @@ struct ContentView: View {
             lines.append("== 运行环境 ==")
             lines.append(service.environmentProbe)
         }
+        if !service.codecProbe.isEmpty {
+            lines.append("")
+            lines.append("== 编码自检 ==")
+            lines.append(service.codecProbe)
+        }
         lines.append("")
         lines.append("== 选择器 ==")
         lines.append(service.lastPickerReport.isEmpty ? "(未使用)" : service.lastPickerReport)
@@ -488,6 +493,18 @@ struct ContentView: View {
                         service.refreshSubtypePanel()
                     } label: {
                         Label("刷新数据库状态", systemImage: "arrow.clockwise")
+                    }
+
+                    Button {
+                        service.runCodecSelfTest()
+                    } label: {
+                        Label("编码自检（PNG / JPEG / HEIC）", systemImage: "waveform.path.ecg")
+                    }
+
+                    if !service.codecProbe.isEmpty {
+                        Text(service.codecProbe)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
                     }
 
                     if let last = service.subtypeLastResult {

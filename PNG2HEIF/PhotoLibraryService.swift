@@ -185,6 +185,8 @@ final class PhotoLibraryService: ObservableObject {
     @Published var environmentProbe = ""
     /// 选择器回传情况（选了图却什么都没发生的时候，看这一行）
     @Published var lastPickerReport = ""
+    /// 编码自检结果
+    @Published var codecProbe = ""
 
     // 截图标记（ZASSET.ZKINDSUBTYPE）
     /// 默认关闭：打开后，转换成功的资产会被写成截图（10）。关闭时程序行为与以前完全一致。
@@ -458,6 +460,10 @@ final class PhotoLibraryService: ObservableObject {
         let manager = FileManager.default
         let work = resolveWorkDirectory()
         var lines: [String] = []
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        lines.append("App 版本：\(version)（build \(build)）")
         lines.append("工作目录：\(work.url?.path ?? "无（两个候选都写不了）")")
         lines.append(work.detail)
         if let documents = manager.urls(for: .documentDirectory, in: .userDomainMask).first {
@@ -469,6 +475,99 @@ final class PhotoLibraryService: ObservableObject {
             lines.append("Documents：不可用")
         }
         return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Codec Self Test
+
+    /// 编码自检。目的：区分"编码器在这台机器上就是坏的"与"某一类图被拒"。
+    /// 用**代码生成**的标准 8bit RGB 图分别试 PNG / JPEG / HEIC（三条互不相同的编码器路径），
+    /// 再拿一张真实资产的 PNG 走完整阶梯，最后探一下 CIContext
+    /// （这台机器的 CoreImage 有已知毛病：那个项目崩在 CI::GLContext）。
+    func runCodecSelfTest() {
+        workerQueue.async { [weak self] in
+            guard let self = self else { return }
+            let report = self.codecSelfTest()
+            DispatchQueue.main.async { self.codecProbe = report }
+        }
+    }
+
+    private func codecSelfTest() -> String {
+        var lines: [String] = []
+        let resolved = PhotoLibraryService.resolveWorkDirectory()
+        lines.append("工作目录：\(resolved.url?.path ?? "无")　\(resolved.detail)")
+        guard let directory = resolved.url else { return lines.joined(separator: "\n") }
+
+        if let synthetic = PhotoLibraryService.syntheticImage() {
+            lines.append("测试图：\(synthetic.width)×\(synthetic.height) \(synthetic.bitsPerComponent)bit alpha=\(synthetic.alphaInfo.rawValue)")
+            lines.append(PhotoLibraryService.encodeProbe(synthetic, type: .png, in: directory, label: "生成图 → PNG "))
+            lines.append(PhotoLibraryService.encodeProbe(synthetic, type: .jpeg, in: directory, label: "生成图 → JPEG"))
+            lines.append(PhotoLibraryService.encodeProbe(synthetic, type: .heic, in: directory, label: "生成图 → HEIC"))
+        } else {
+            lines.append("测试图生成失败：CoreGraphics 位图上下文建不起来")
+        }
+
+        if let asset = assets.first(where: { PhotoLibraryService.pngResource(of: $0) != nil }),
+           let resource = PhotoLibraryService.pngResource(of: asset) {
+            let attempt = attemptEncode(resource: resource, directory: directory, quality: compressionQuality)
+            if attempt.url != nil {
+                lines.append("真实资产 \(resource.originalFilename)：HEIC 通过")
+            } else {
+                lines.append("真实资产 \(resource.originalFilename)：HEIC 失败 — \(attempt.failure ?? "未知")")
+            }
+        } else {
+            lines.append("没找到可用于测试的 PNG 资产（先点「扫描图库」）")
+        }
+
+        lines.append(PhotoLibraryService.coreImageProbe())
+        return lines.joined(separator: "\n")
+    }
+
+    static func pngResource(of asset: PHAsset) -> PHAssetResource? {
+        PHAssetResource.assetResources(for: asset).first(where: {
+            let uti = $0.uniformTypeIdentifier.lowercased()
+            return uti == "public.png" || uti.contains("png") || $0.originalFilename.lowercased().hasSuffix(".png")
+        })
+    }
+
+    /// 代码生成的标准 8bit sRGB 图，不带任何来自文件的怪东西
+    private static func syntheticImage() -> CGImage? {
+        let size = 256
+        guard let context = CGContext(data: nil,
+                                      width: size,
+                                      height: size,
+                                      bitsPerComponent: 8,
+                                      bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        context.setFillColor(UIColor(red: 0.2, green: 0.5, blue: 0.9, alpha: 1).cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+        context.setFillColor(UIColor.white.cgColor)
+        context.fill(CGRect(x: 32, y: 32, width: 64, height: 64))
+        return context.makeImage()
+    }
+
+    private static func encodeProbe(_ image: CGImage, type: UTType, in directory: URL, label: String) -> String {
+        let url = directory.appendingPathComponent(UUID().uuidString + "." + (type.preferredFilenameExtension ?? "bin"))
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil) else {
+            return "\(label)：无法创建编码器"
+        }
+        let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.82]
+        CGImageDestinationAddImage(destination, image, props as CFDictionary)
+        let ok = CGImageDestinationFinalize(destination)
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
+        try? FileManager.default.removeItem(at: url)
+        return "\(label)：\(ok ? "通过（\(size) 字节）" : "失败")"
+    }
+
+    private static func coreImageProbe() -> String {
+        let context = CIContext(options: nil)
+        let bounds = CGRect(x: 0, y: 0, width: 64, height: 64)
+        let image = CIImage(color: CIColor(red: 0.3, green: 0.6, blue: 0.2)).cropped(to: bounds)
+        guard let rendered = context.createCGImage(image, from: bounds) else {
+            return "CIContext：渲染失败（这台机器 CoreImage 有已知毛病）"
+        }
+        return "CIContext：可用（64×64 渲染成功，输出 \(rendered.width)×\(rendered.height)）"
     }
 
     // MARK: - Conversion Control
@@ -853,13 +952,16 @@ final class PhotoLibraryService: ObservableObject {
             }
             reasons.append("原图直接编码失败（\(shape)）")
 
-            if let flattened = PhotoLibraryService.flattenedForHEIC(cgImage),
-               let url = PhotoLibraryService.writeHEIC(flattened, in: directory, quality: quality) {
-                outputURL = url
-                semaphore.signal()
-                return
+            if let flattened = PhotoLibraryService.flattenedForHEIC(cgImage) {
+                if let url = PhotoLibraryService.writeHEIC(flattened, in: directory, quality: quality) {
+                    outputURL = url
+                    semaphore.signal()
+                    return
+                }
+                reasons.append("重画成 8bit sRGB 去掉 alpha 后编码仍失败")
+            } else {
+                reasons.append("无法重画（CGContext 位图上下文创建失败）")
             }
-            reasons.append("重画成 8bit sRGB 去掉 alpha 后仍失败")
 
             if let url = PhotoLibraryService.writeHEICWithCoreImage(cgImage, in: directory, quality: quality) {
                 outputURL = url
