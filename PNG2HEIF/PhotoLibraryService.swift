@@ -458,6 +458,11 @@ final class PhotoLibraryService: ObservableObject {
     /// 排查时等于没有信息
     private var lastFailureReason: String?
 
+    /// 本机 ImageIO 的 HEIC 编码是否已被证明不可用。
+    /// 自检实测：连代码生成的 8bit sRGB 图都编不出 HEIC（PNG/JPEG 正常），所以这是**设备级**结论，
+    /// 一旦确认就跳过，省掉每张图两次注定失败的编码。
+    private static var imageIOHEICUnusable = false
+
     static func environmentReport() -> String {
         let manager = FileManager.default
         let work = resolveWorkDirectory()
@@ -964,26 +969,29 @@ final class PhotoLibraryService: ObservableObject {
             }()
             let shape = "\(cgImage.width)×\(cgImage.height) \(cgImage.bitsPerComponent)bit/\(cgImage.bitsPerPixel)bpp alpha=\(cgImage.alphaInfo.rawValue) cs=\(spaceName)"
 
-            /* 只走 ImageIO。**绝不碰 CoreImage**：这台机器上 `CIContext(options:)` 会在
-               CI::GLContext::GLContext 里空指针崩溃（2026-09-23 12:20 的崩溃日志为证），
-               之前那条 CoreImage 兜底就是这么把 App 打死的。
-               每一步用新的输出文件名 —— 失败过的 URL 会让下一个 destination 创建失败。 */
-            if let url = PhotoLibraryService.writeHEIC(cgImage, in: directory, quality: quality) {
-                outputURL = url
-                semaphore.signal()
-                return
-            }
-            reasons.append("原图直接编码失败（\(shape)）")
-
-            if let flattened = PhotoLibraryService.flattenedForHEIC(cgImage) {
-                if let url = PhotoLibraryService.writeHEIC(flattened, in: directory, quality: quality) {
+            /* ImageIO 这条路：一旦确认不可用就跳过，别为每张图白跑两次注定失败的编码。
+               判据是设备级的（自检里连代码生成的干净图都编不出 HEIC），不是单张文件的问题。 */
+            if PhotoLibraryService.imageIOHEICUnusable {
+                reasons.append("跳过 ImageIO（这台设备已确认编不出 HEIC）")
+            } else {
+                if let url = PhotoLibraryService.writeHEIC(cgImage, in: directory, quality: quality) {
                     outputURL = url
                     semaphore.signal()
                     return
                 }
-                reasons.append("重画成 8bit sRGB 去掉 alpha 后编码仍失败")
-            } else {
-                reasons.append("无法重画（CGContext 位图上下文创建失败）")
+                reasons.append("原图直接编码失败（\(shape)）")
+
+                if let flattened = PhotoLibraryService.flattenedForHEIC(cgImage) {
+                    if let url = PhotoLibraryService.writeHEIC(flattened, in: directory, quality: quality) {
+                        outputURL = url
+                        semaphore.signal()
+                        return
+                    }
+                    reasons.append("重画成 8bit sRGB 去掉 alpha 后编码仍失败")
+                } else {
+                    reasons.append("无法重画（CGContext 位图上下文创建失败）")
+                }
+                PhotoLibraryService.imageIOHEICUnusable = true
             }
 
             /* 第三条路：自己来。自检显示这台设备的 ImageIO 编不出 HEIC（连生成的干净图也失败）

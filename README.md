@@ -175,6 +175,23 @@ CGImage → CVPixelBuffer(BGRA) → VTCompressionSession(HEVC, 单帧)
 ffprobe 能识别（`hevc 64×64`）、ffmpeg 能完整解码回 PNG，然后才把逻辑移植到 Swift ——
 **不拿真机当编译器**。
 
+### 排错五：结论 —— IOSurface 申请不到，绕开即可
+
+自检最后给出的两行把路打通了：
+
+```
+生成图 → 自建 HEIF：通过（512 字节）
+真实资产 IMG_0001.PNG：HEIC 通过
+CVPixelBuffer：无附加属性 CVReturn=0（基地址 可写），带 IOSurface CVReturn=-6662
+```
+
+`-6662` 是 **`kCVReturnAllocationFailed`** —— 这台机器**申请不到 IOSurface**（和
+CoreImage 建不了 GL 上下文是同一个底层问题），而普通 `CVPixelBuffer` 完全正常。
+所以 `makePixelBuffer` 现在是**无附加属性优先**，失败才依次试其它组合。
+
+另外：ImageIO 的 HEIC 已经确认是设备级不可用（连生成的干净图都失败），
+所以一旦确认就**跳过那两次尝试**，批量转换不必为每张图白跑两遍。
+
 ### 自选转换：应用内选图 + 选图与 SQL 行对应
 
 - 「在图库里选择照片」用 `PHPickerViewController`（进程内运行，不需要额外授权弹窗）。
