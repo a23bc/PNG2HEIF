@@ -1803,7 +1803,7 @@ enum HEIFWriter {
            ffmpeg 自己 mux 出来的 AVIF 对 av1C 就是这么做的（ipma 关联字节 01 02 83 04）；
            四条都不带 essential 的版本被 PhotoKit 判为 PHPhotosErrorInvalidResource(3302)。
            ispe / colr / pixi 按参考实现不带 essential。 */
-        let ipma = fullBox("ipma", u32(1) + u16(1) + u8(4) + Data([1, 0x80 | 2, 3, 4]))
+        let ipma = fullBox("ipma", u32(1) + u16(1) + u8(4) + Data([1, UInt8(0x80 | 2), 3, 4]))
         let iprp = box("iprp", ipco + ipma)
 
         let infe = fullBox("infe", u16(1) + u16(0) + "hvc1".data(using: .ascii)! + u8(0))
