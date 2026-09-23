@@ -513,6 +513,19 @@ final class PhotoLibraryService: ObservableObject {
             let own = HEIFWriter.encode(synthetic, quality: 0.82)
             if let data = own.data {
                 lines.append("生成图 → 自建 HEIF：通过（\(data.count) 字节）")
+                // 回读：PhotoKit 很可能也用 ImageIO 来校验/解码，这里先自己验一遍
+                let url = directory.appendingPathComponent(UUID().uuidString + ".heic")
+                if (try? data.write(to: url)) != nil {
+                    if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                       let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                        lines.append("自建 HEIF 回读：通过（\(decoded.width)×\(decoded.height)）")
+                    } else {
+                        lines.append("自建 HEIF 回读：失败（ImageIO 解不开我们写的文件）")
+                    }
+                    try? FileManager.default.removeItem(at: url)
+                } else {
+                    lines.append("自建 HEIF 回读：无法写入临时文件")
+                }
             } else {
                 lines.append("生成图 → 自建 HEIF：失败 — \(own.failure ?? "未知")")
             }
@@ -534,7 +547,42 @@ final class PhotoLibraryService: ObservableObject {
 
         lines.append(PhotoLibraryService.videoToolboxProbe())
         lines.append(PhotoLibraryService.pixelBufferProbe())
+        lines.append(PhotoLibraryService.heicDecodeControl(in: directory))
         return lines.joined(separator: "\n")
+    }
+
+    /// 对照：图库里已有的 HEIC（Live Photo / 之前转出来的）能不能解码。
+    /// 用来区分两种情形：**我们的容器写坏了** 还是 **这台机器的 HEIC 解码本身就坏**。
+    private static func heicDecodeControl(in directory: URL) -> String {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        var found: PHAssetResource?
+        PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, stop in
+            if let resource = PHAssetResource.assetResources(for: asset).first(where: {
+                $0.uniformTypeIdentifier.lowercased().contains("heic")
+            }) {
+                found = resource
+                stop.pointee = true
+            }
+        }
+        guard let resource = found else { return "对照：图库里没找到 HEIC 资产" }
+
+        let url = directory.appendingPathComponent(UUID().uuidString + ".heic")
+        let semaphore = DispatchSemaphore(value: 0)
+        var exported = false
+        PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: nil) { error in
+            exported = (error == nil)
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 60)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard exported else { return "对照：系统 HEIC（\(resource.originalFilename)）导出失败" }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return "对照：系统 HEIC（\(resource.originalFilename)）解码失败 —— 这台机器的 HEIC 解码也有问题"
+        }
+        return "对照：系统 HEIC（\(resource.originalFilename)）解码通过（\(decoded.width)×\(decoded.height)）"
     }
 
     /// 单独探一下 CVPixelBuffer 本身：不带附加属性 vs 带 IOSurface。
@@ -1091,53 +1139,75 @@ final class PhotoLibraryService: ObservableObject {
         let heifData = try? Data(contentsOf: heifURL)
 
         guard let heifData = heifData else {
-            print("[PNG2HEIF] 读取 HEIF Data 失败")
+            lastFailureReason = "读不出刚生成的 HEIF 文件：\(heifURL.path)"
             return false
         }
 
-        PHPhotoLibrary.shared().performChanges({
-            let req = PHAssetCreationRequest.forAsset()
-            if let loc = loc { req.location = loc }
-            req.isFavorite = fav
-            /* 明确告诉 PhotoKit 这是 HEIC、并给出文件名 —— 自建容器不是 Apple 产的，
-               与其让它去嗅探，不如把类型写明，导入行为更可预期 */
-            let resourceOptions = PHAssetResourceCreationOptions()
-            resourceOptions.uniformTypeIdentifier = "public.heic"
-            resourceOptions.originalFilename = outputFilename
-            req.addResource(with: .photo, data: heifData, options: resourceOptions)
-            createdLocalIdentifier = req.placeholderForCreatedAsset?.localIdentifier
+        /* 先带显式类型导入；被拒就退回"不指定 options"再试一次。
+           自建容器不是 Apple 产的，两种方式哪种被 PhotoKit 接受，实测说了算 ——
+           两次都失败时把两边的错误都带出来。 */
+        var importError: String?
+        for attempt in [true, false] {
+            var identifier: String?
+            var failure: String?
+            let attemptSemaphore = DispatchSemaphore(value: 0)
 
-            if let album = album {
-                let placeholder = req.placeholderForCreatedAsset
-                if let placeholder = placeholder {
+            PHPhotoLibrary.shared().performChanges({
+                let req = PHAssetCreationRequest.forAsset()
+                if let loc = loc { req.location = loc }
+                req.isFavorite = fav
+                if attempt {
+                    let resourceOptions = PHAssetResourceCreationOptions()
+                    resourceOptions.uniformTypeIdentifier = "public.heic"
+                    resourceOptions.originalFilename = outputFilename
+                    req.addResource(with: .photo, data: heifData, options: resourceOptions)
+                } else {
+                    req.addResource(with: .photo, data: heifData, options: nil)
+                }
+                identifier = req.placeholderForCreatedAsset?.localIdentifier
+
+                if let album = album, let placeholder = req.placeholderForCreatedAsset {
                     let albumChange = PHAssetCollectionChangeRequest(for: album)
                     albumChange?.addAssets([placeholder] as NSArray)
                 }
-            }
-        }) { changed, error in
-            if changed && error == nil {
-                convertSuccess = true
-
-                if shouldMarkScreenshot {
-                    self.markAsScreenshot(source: asset, localIdentifier: createdLocalIdentifier)
-                }
-
-                if shouldDelete {
-                    PHPhotoLibrary.shared().performChanges({
-                        PHAssetChangeRequest.deleteAssets([asset] as NSArray)
-                    }) { deleted, _ in
-                        convertSuccess = convertSuccess && deleted
-                        semaphore.signal()
-                    }
+            }) { changed, error in
+                if changed && error == nil {
+                    createdLocalIdentifier = identifier
                 } else {
-                    semaphore.signal()
+                    failure = error.map { "\($0.domain) \($0.code)：\($0.localizedDescription)" }
+                        ?? "no error object, changed=\(changed)"
                 }
-            } else {
-                if let error = error {
-                    print("[PNG2HEIF] 导入照片库失败: \(error.localizedDescription)")
+                attemptSemaphore.signal()
+            }
+
+            _ = attemptSemaphore.wait(timeout: .now() + 120)
+            if createdLocalIdentifier != nil { break }
+            importError = (attempt ? "显式 public.heic：" : "不指定类型：") + (failure ?? "未知原因")
+        }
+
+        guard let newIdentifier = createdLocalIdentifier else {
+            lastFailureReason = "导入照片库失败（\(importError ?? "未知原因")）"
+            return false
+        }
+        convertSuccess = true
+
+        if shouldMarkScreenshot {
+            markAsScreenshot(source: asset, localIdentifier: newIdentifier)
+        }
+
+        if shouldDelete {
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+            }) { deleted, error in
+                if !deleted {
+                    lastFailureReason = "导入成功，但删除原 PNG 失败："
+                        + (error.map { $0.localizedDescription } ?? "未知原因")
+                    convertSuccess = false
                 }
                 semaphore.signal()
             }
+        } else {
+            semaphore.signal()
         }
 
         _ = semaphore.wait(timeout: .now() + 120)
