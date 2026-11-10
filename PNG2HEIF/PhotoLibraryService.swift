@@ -500,6 +500,10 @@ final class PhotoLibraryService: ObservableObject {
 
     private func codecSelfTest() -> String {
         var lines: [String] = []
+        // 让每张自检截图自证身份：版本号+剥离开关就在输出第一行，
+        // 不再依赖可能被通知挡住、或读盘不读进程的表头。
+        let selfBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        lines.append("自检 build \(selfBuild) · 剥离in-band=\(HEIFWriter.Variant.appleLike.stripNonVCL)")
         let resolved = PhotoLibraryService.resolveWorkDirectory()
         lines.append("工作目录：\(resolved.url?.path ?? "无")　\(resolved.detail)")
         guard let directory = resolved.url else { return lines.joined(separator: "\n") }
