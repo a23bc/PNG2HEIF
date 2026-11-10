@@ -1863,13 +1863,18 @@ enum HEIFWriter {
         let appleBrands: Bool
         // 编码侧开关：容器试了一圈都无效，所以把嫌疑转向码流本身
         let forceKeyFrame: Bool
+        // hvc1 的 item 里只许有 VCL 切片 NAL；参数集只能放在 hvcC。
+        // Apple 自己的 HEIC 每个 item 就是一个长度前缀 IDR，ffmpeg 容忍 in-band
+        // 参数集而 Apple 解码器不容忍 —— 这是 6 个容器变体全 ✗ 后唯一没试过的轴。
+        var stripNonVCL: Bool = true
 
         /// 旧布局（只标 hvcC essential）—— 留作对照，自检里也保留
         static let legacyVariant = Variant(label: "旧布局（只标 hvcC essential，对照）",
                                            ispeEssential: false, colrEssential: false,
                                            itemType: "hvc1", includeColr: true, includePixi: true,
                                            lengthPrefixed: true, includeDinf: false, ilocLast: false,
-                                           markMainStill: false, appleBrands: false, forceKeyFrame: true)
+                                           markMainStill: false, appleBrands: false, forceKeyFrame: true,
+                                           stripNonVCL: false)
 
         /// 转换路径默认就用 Apple 式：既然实测是本机 ImageIO 解不开旧布局，
         /// 那就没有再拿旧布局去导入的道理
@@ -1967,6 +1972,23 @@ enum HEIFWriter {
         return out.isEmpty ? data : out
     }
 
+    /// 只保留 VCL 切片 NAL（类型 < 32），丢掉 in-band 的 VPS/SPS/PPS/SEI，保留 4 字节长度前缀。
+    /// 与本地 heif_proto.py 的 strip_non_vcl 同一套逻辑，已用 ffmpeg 验证剥离后仍可解码。
+    private static func keepOnlyVCL(_ data: Data) -> Data {
+        var out = Data()
+        var offset = 0
+        while offset + 4 <= data.count {
+            let length = (Int(data[offset]) << 24) | (Int(data[offset + 1]) << 16)
+                | (Int(data[offset + 2]) << 8) | Int(data[offset + 3])
+            let start = offset + 4
+            guard length > 0, start + length <= data.count else { break }
+            let nalType = (Int(data[start]) >> 1) & 0x3F
+            if nalType < 32 { out.append(data[offset..<(start + length)]) }
+            offset = start + length
+        }
+        return out.isEmpty ? data : out
+    }
+
     /// hvcC 第 1 个字节（configurationVersion 之后）是 general_profile_space(2) | tier(1) | profile_idc(5)。
     /// 单帧静止图本来就符合 Main Still Picture 的语义，所以把 idc 标成 3 是如实声明 ——
     /// Apple 自己的 HEIC 也是 idc=3，而 VideoToolbox 给的是 Main(1)。
@@ -2031,7 +2053,8 @@ enum HEIFWriter {
                          0x64, 0x72, 0x65, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
                          0x00, 0x00, 0x00, 0x0C, 0x75, 0x72, 0x6C, 0x20, 0x00, 0x00, 0x00, 0x01])
 
-        let payload = variant.lengthPrefixed ? itemData : stripLengthPrefixes(itemData)
+        let cleaned = variant.stripNonVCL ? keepOnlyVCL(itemData) : itemData
+        let payload = variant.lengthPrefixed ? cleaned : stripLengthPrefixes(cleaned)
 
         func iloc(offset: UInt32) -> Data {
             fullBox("iloc", Data([0x44, 0x40]) + u16(1) + u16(1) + u16(0) + u32(0)
