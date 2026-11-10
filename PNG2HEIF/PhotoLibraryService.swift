@@ -2066,7 +2066,8 @@ enum HEIFWriter {
         let ipma = fullBox("ipma", u32(1) + u16(1) + u8(UInt8(associations.count)) + Data(associations))
         let iprp = box("iprp", ipco + ipma)
 
-        let infe = fullBox("infe", u16(1) + u16(0) + variant.itemType.data(using: .ascii)! + u8(0))
+        // infe 带 4 字符 item_type 必须 version 2；fullBox 固定 version 0 会把 hvc1 当成 item_name，item 不被识别为 HEVC
+        let infe = box("infe", u8(2) + Data([0, 0, 0]) + u16(1) + u16(0) + variant.itemType.data(using: .ascii)! + u8(0))
         let iinf = fullBox("iinf", u16(1) + infe)
         let pitm = fullBox("pitm", u16(1))
         let hdlr = fullBox("hdlr", u32(0) + "pict".data(using: .ascii)! + Data(repeating: 0, count: 12) + u8(0))
