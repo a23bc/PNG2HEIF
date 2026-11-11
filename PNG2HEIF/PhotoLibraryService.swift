@@ -292,16 +292,15 @@ final class PhotoLibraryService: ObservableObject {
         // 这一行的 ZUUID 应当等于新资产 localIdentifier 的 UUID；但 ZUUID 导入瞬间可能还没落盘，
         // 所以再用"最近添加 + heic + 原始文件名"独立确认兜底，避免把空 ZUUID 误判为错行。
         let rowUUID = row?.uuid ?? ""
-        let desired = source.originalFilenameForConversion
-        let uuidEqual = !rowUUID.isEmpty && rowUUID == newUUID
-        let uuidMatched = uuidEqual || ScreenshotSubtype.confirmedNewRow(zpk: zpk, originalFilename: desired)
+        let identifierPresent = !(localIdentifier ?? "").isEmpty
+        // findZPK 在有标识符时只按 ZUUID 命中返回，本身就保证是新资产；回读 row 可能因 WAL
+        // 延迟整行读不到，不能拿"读不到"当否决证据，只有"读到且 UUID 不等"才判错行。
+        let uuidMatched = identifierPresent && (rowUUID.isEmpty || rowUUID == newUUID)
         let note: String?
-        if localIdentifier == nil {
+        if !identifierPresent {
             note = "localIdentifier 缺失，按「最新一行」兜底定位，请人工核对"
-        } else if !uuidMatched {
+        } else if !rowUUID.isEmpty && rowUUID != newUUID {
             note = "UUID 不吻合（新=\(newUUID ?? "nil")；行=\(rowUUID)/\(row?.filename ?? "nil")；zpk=\(zpk)）"
-        } else if !uuidEqual {
-            note = "ZUUID 未落盘，按原始文件名+添加时间确认为新资产"
         } else {
             note = nil
         }
@@ -341,7 +340,15 @@ final class PhotoLibraryService: ObservableObject {
     /// 让排序回到原位置。只作用于已 UUID 确认的新资产行；目标重名或物理改名失败就保留
     /// Photos 命名，绝不覆盖已有文件；写库失败则回滚改名。
     private func applySeamlessReplacement(source: PHAsset, zpk: Int64) -> String {
-        guard let info = ScreenshotSubtype.replacementInfo(zpk: zpk), !info.directory.isEmpty else {
+        // 新行可能因 WAL 可见性延迟暂时读不到，重试几轮再放弃
+        var info = ScreenshotSubtype.replacementInfo(zpk: zpk)
+        var tries = 0
+        while (info == nil || info?.directory.isEmpty == true) && tries < 8 {
+            Thread.sleep(forTimeInterval: 0.25)
+            info = ScreenshotSubtype.replacementInfo(zpk: zpk)
+            tries += 1
+        }
+        guard let info = info, !info.directory.isEmpty else {
             return "无缝替换：读不到新行/目录"
         }
         guard let sourceZpk = ScreenshotSubtype.findZPK(localIdentifier: source.localIdentifier),
@@ -520,7 +527,7 @@ final class PhotoLibraryService: ObservableObject {
 
     /// 编译期烧进二进制的版本号。自检首行与对应表都打印它：磁盘 plist 会被重装换成新值，
     /// 但运行中的旧进程仍烧着旧值，靠它识破"表头新、代码旧"的旧进程谎报。
-    static let compiledBuild = 17
+    static let compiledBuild = 18
 
     static func environmentReport() -> String {
         let manager = FileManager.default
@@ -1728,29 +1735,6 @@ enum ScreenshotSubtype {
         sqlite3_bind_int64(stmt, 1, zpk)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return (text(stmt, 0), text(stmt, 1), sqlite3_column_double(stmt, 2))
-    }
-
-    /// ZUUID 在导入瞬间可能还没落盘（实测行 UUID 为空）。用独立证据确认"这行就是刚建的新资产"：
-    /// 最近 120 秒内添加 + UTI 为 heic + 原始文件名等于我们导入时设的名字。不依赖 ZUUID 时机。
-    static func confirmedNewRow(zpk: Int64, originalFilename: String) -> Bool {
-        let (db, _) = open(SQLITE_OPEN_READONLY)
-        guard let db = db else { return false }
-        defer { sqlite3_close(db) }
-        var stmt: OpaquePointer?
-        let sql = """
-        SELECT COUNT(*) FROM ZASSET a
-        LEFT JOIN ZADDITIONALASSETATTRIBUTES d ON d.Z_PK = a.ZADDITIONALASSETATTRIBUTES
-        WHERE a.Z_PK = ?1 AND IFNULL(d.ZORIGINALFILENAME,'') = ?2
-          AND IFNULL(a.ZUNIFORMTYPEIDENTIFIER,'') = 'public.heic'
-          AND IFNULL(a.ZADDEDDATE,0) > ?3
-        """
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int64(stmt, 1, zpk)
-        sqlite3_bind_text(stmt, 2, originalFilename, -1, transient)
-        sqlite3_bind_double(stmt, 3, Date().timeIntervalSinceReferenceDate - 120)
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return false }
-        return sqlite3_column_int64(stmt, 0) > 0
     }
 
     /// 一条 UPDATE 同时写文件名与排序 token（仍是一行），回读数据库真实值。
