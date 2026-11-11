@@ -980,19 +980,26 @@ final class PhotoLibraryService: ObservableObject {
 
     // MARK: - Private: Encode HEIF
 
-    /// 铺一层白底、重画成 8bit sRGB 并去掉 alpha 通道。
+    /// 铺一层白底、重画成 8bit 并去掉 alpha 通道。
     /// HEIF 里没有 alpha；而且 16bit / 索引 / 非标准色彩空间的 PNG 也可能被编码器拒绝，
-    /// 重画一遍能把这些一次性归到标准形态。
+    /// 重画一遍能把这些一次性归到标准形态。源是 Display P3 就保留 P3（广色域截图不掉色），
+    /// 其余归到 sRGB；像素缓冲与 colr 必须跟这里选的空间一致。
     private static func flattenedForHEIC(_ image: CGImage) -> CGImage? {
         let width = image.width
         let height = image.height
         let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        let space: CGColorSpace
+        if let source = image.colorSpace, source.name == CGColorSpace.displayP3 {
+            space = source
+        } else {
+            space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        }
         guard let context = CGContext(data: nil,
                                       width: width,
                                       height: height,
                                       bitsPerComponent: 8,
                                       bytesPerRow: 0,
-                                      space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                                      space: space,
                                       bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
         context.setFillColor(UIColor.white.cgColor)
         context.fill(rect)
@@ -1590,9 +1597,15 @@ enum ScreenshotSubtype {
     static func findZPK(localIdentifier: String?) -> Int64? {
         if let localIdentifier = localIdentifier, !localIdentifier.isEmpty {
             let uuid = localIdentifier.split(separator: "/").first.map(String.init) ?? localIdentifier
-            if let pk = scalarInt64("SELECT Z_PK FROM ZASSET WHERE ZUUID = ?1 LIMIT 1", text: uuid) {
-                return pk
+            // 导入瞬间 Photos 的 WAL 可能还没落盘，重试几轮；仍查不到就返回 nil。
+            // 有标识符时绝不退回"最新一行"——那会抓到上一个资产、把标记写错行。
+            for _ in 0..<8 {
+                if let pk = scalarInt64("SELECT Z_PK FROM ZASSET WHERE ZUUID = ?1 LIMIT 1", text: uuid) {
+                    return pk
+                }
+                Thread.sleep(forTimeInterval: 0.25)
             }
+            return nil
         }
 
         let (db, _) = open(SQLITE_OPEN_READONLY)
@@ -1676,8 +1689,11 @@ enum HEIFWriter {
             return (nil, encoded.reason ?? "VideoToolbox 编码失败")
         }
         guard !stream.config.isEmpty else { return (nil, "编码器没给出 hvcC 配置") }
+        // Display P3 的 nclx primaries=12（SMPTE EG 432），sRGB/BT.709 用 1；transfer 都是 sRGB(13)
+        let primaries: UInt16 = (image.colorSpace?.name == CGColorSpace.displayP3) ? 12 : 1
         return (buildContainer(width: width, height: height,
-                               itemData: stream.data, hvcC: stream.config, variant: variant), nil)
+                               itemData: stream.data, hvcC: stream.config, variant: variant,
+                               primaries: primaries), nil)
     }
 
     // MARK: - CGImage -> CVPixelBuffer
@@ -1689,6 +1705,9 @@ enum HEIFWriter {
         let width = image.width
         let height = image.height
         let srgb = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        // 只保留 Display P3；灰度/索引/怪空间一律归 sRGB，否则 BGRA 位图上下文建不起来
+        let space: CGColorSpace
+        if let cs = image.colorSpace, cs.name == CGColorSpace.displayP3 { space = cs } else { space = srgb }
 
         let combinations: [(label: String,
                             format: OSType,
@@ -1713,6 +1732,9 @@ enum HEIFWriter {
                 reasons.append("\(combination.label)：CVPixelBufferCreate 失败（CVReturn \(created)）")
                 continue
             }
+            // 告诉 VT 这块 RGB 缓冲的色彩空间，否则它按 sRGB/BT.709 转 YUV，P3 就丢了
+            CVBufferSetAttachment(pixelBuffer, kCVImageBufferCGColorSpaceKey, space,
+                                  kCVAttachmentMode_ShouldPropagate)
 
             let locked = CVPixelBufferLockBaseAddress(pixelBuffer, [])
             guard locked == kCVReturnSuccess else {
@@ -1730,7 +1752,7 @@ enum HEIFWriter {
                                           height: height,
                                           bitsPerComponent: 8,
                                           bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
-                                          space: srgb,
+                                          space: space,
                                           bitmapInfo: combination.alpha.rawValue | combination.byteOrder.rawValue) else {
                 reasons.append("\(combination.label)：CGContext 创建失败")
                 continue
@@ -2026,7 +2048,7 @@ enum HEIFWriter {
     }
 
     static func buildContainer(width: Int, height: Int, itemData: Data, hvcC: Data,
-                               variant: Variant = .defaultVariant) -> Data {
+                               variant: Variant = .defaultVariant, primaries: UInt16 = 1) -> Data {
         // Apple 的 ftyp：major heic，兼容品牌五个（旧布局只用两个）——
         // 拆成循环写，Swift 的类型检查器会被一长串 `Data + Data` 拖垮（CI 实测）
         let compatibleBrands: [String] = variant.appleBrands
@@ -2041,8 +2063,8 @@ enum HEIFWriter {
         let ispe = fullBox("ispe", u32(UInt32(width)) + u32(UInt32(height)))
         let config = variant.markMainStill ? markMainStillPicture(hvcC) : hvcC
         let hvcCBox = box("hvcC", config)
-        // nclx：BT.709 primaries / sRGB transfer / BT.709 matrix / full range
-        let colr = box("colr", "nclx".data(using: .ascii)! + u16(1) + u16(13) + u16(1) + u8(0x80))
+        // nclx：primaries 由源色彩空间定（P3=12 / BT.709=1）/ sRGB transfer / BT.709 matrix / full range
+        let colr = box("colr", "nclx".data(using: .ascii)! + u16(primaries) + u16(13) + u16(1) + u8(0x80))
         let pixi = fullBox("pixi", u8(3) + u8(8) + u8(8) + u8(8))
 
         var properties: [Data] = [ispe, hvcCBox]
