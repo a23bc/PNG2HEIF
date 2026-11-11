@@ -527,7 +527,7 @@ final class PhotoLibraryService: ObservableObject {
 
     /// 编译期烧进二进制的版本号。自检首行与对应表都打印它：磁盘 plist 会被重装换成新值，
     /// 但运行中的旧进程仍烧着旧值，靠它识破"表头新、代码旧"的旧进程谎报。
-    static let compiledBuild = 18
+    static let compiledBuild = 19
 
     static func environmentReport() -> String {
         let manager = FileManager.default
@@ -633,6 +633,7 @@ final class PhotoLibraryService: ObservableObject {
         lines.append(PhotoLibraryService.videoToolboxProbe())
         lines.append(PhotoLibraryService.pixelBufferProbe())
         lines.append(PhotoLibraryService.heicDecodeControl(in: directory))
+        lines.append(IndexExperiment.runOnCopy())
         return lines.joined(separator: "\n")
     }
 
@@ -1759,6 +1760,103 @@ enum ScreenshotSubtype {
             return .failure(.message("回读失败"))
         }
         return .success((after.filename, after.sortToken))
+    }
+}
+
+// MARK: - Index experiment (copy only)
+
+/// 只在**副本**上模拟"改 Z_PK"：把最新 HEIC 资产移到最新 PNG 资产的 Z_PK（删原行+级联全部外键），
+/// 跑 integrity_check / foreign_key_check 并统计孤儿行，看改索引的结构后果。绝不写真库。
+enum IndexExperiment {
+    private static func exec(_ db: OpaquePointer?, _ sql: String) -> Bool {
+        sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK
+    }
+    private static func int(_ db: OpaquePointer?, _ sql: String) -> Int64? {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(stmt, 0)
+    }
+    private static func firstText(_ db: OpaquePointer?, _ sql: String) -> String {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return "?" }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW, let raw = sqlite3_column_text(stmt, 0) else { return "?" }
+        return String(cString: raw)
+    }
+
+    static func runOnCopy() -> String {
+        let fm = FileManager.default
+        let live = ScreenshotSubtype.databasePath
+        guard fm.fileExists(atPath: live) else { return "索引实验：真库不存在" }
+        let dir = fm.temporaryDirectory.appendingPathComponent("idxexp-\(UUID().uuidString)")
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let copy = dir.appendingPathComponent("Photos.sqlite").path
+        for suffix in ["", "-wal", "-shm"] {
+            let src = live + suffix
+            guard fm.fileExists(atPath: src) else { continue }
+            do { try fm.copyItem(atPath: src, toPath: copy + suffix) }
+            catch { return "索引实验：复制失败 \(error.localizedDescription)" }
+        }
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(copy, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+              let db = handle else { return "索引实验：副本打不开" }
+        defer { sqlite3_close(db) }
+
+        guard let newPK = int(db, "SELECT Z_PK FROM ZASSET WHERE ZUNIFORMTYPEIDENTIFIER='public.heic' ORDER BY Z_PK DESC LIMIT 1"),
+              let oldPK = int(db, "SELECT Z_PK FROM ZASSET WHERE ZUNIFORMTYPEIDENTIFIER='public.png' ORDER BY Z_PK DESC LIMIT 1"),
+              newPK != oldPK else { return "索引实验：找不到可模拟的 HEIC/PNG 行" }
+
+        // 发现所有引用 ZASSET 的外键列；Core Data 若没声明外键则退回已知十张表的 ZASSET 列
+        var refs: [(table: String, column: String)] = []
+        var tables: [String] = []
+        var tstmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table'", -1, &tstmt, nil) == SQLITE_OK {
+            while sqlite3_step(tstmt) == SQLITE_ROW {
+                tables.append(String(cString: sqlite3_column_text(tstmt, 0)))
+            }
+        }
+        sqlite3_finalize(tstmt)
+        for table in tables {
+            var fstmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "PRAGMA foreign_key_list(\(table))", -1, &fstmt, nil) == SQLITE_OK else { continue }
+            while sqlite3_step(fstmt) == SQLITE_ROW {
+                let target = String(cString: sqlite3_column_text(fstmt, 2))
+                let from = String(cString: sqlite3_column_text(fstmt, 3))
+                if target == "ZASSET" { refs.append((table, from)) }
+            }
+            sqlite3_finalize(fstmt)
+        }
+        if refs.isEmpty {
+            refs = ["ZADDITIONALASSETATTRIBUTES", "ZEXTENDEDATTRIBUTES", "ZMEDIAANALYSISASSETATTRIBUTES",
+                    "ZCOMPUTEDASSETATTRIBUTES", "ZASSETANALYSISSTATE", "ZINTERNALRESOURCE",
+                    "ZCLOUDRESOURCE", "ZDETECTEDFACE", "ZFACECROP", "ZLEGACYFACE"].map { ($0, "ZASSET") }
+        }
+
+        guard exec(db, "BEGIN") else { return "索引实验：BEGIN 失败" }
+        for (table, column) in refs {
+            _ = exec(db, "DELETE FROM \(table) WHERE \(column)=\(oldPK)")
+            _ = exec(db, "UPDATE \(table) SET \(column)=\(oldPK) WHERE \(column)=\(newPK)")
+        }
+        let moved = exec(db, "DELETE FROM ZASSET WHERE Z_PK=\(oldPK)")
+            && exec(db, "UPDATE ZASSET SET Z_PK=\(oldPK) WHERE Z_PK=\(newPK)")
+        guard moved, exec(db, "COMMIT") else {
+            _ = exec(db, "ROLLBACK")
+            return "索引实验：副本上移动 Z_PK 失败（已回滚副本）"
+        }
+
+        var lines: [String] = ["索引实验（仅副本，真库未动）：HEIC \(newPK) → PNG 的 \(oldPK)，级联 \(refs.count) 个外键列"]
+        lines.append("integrity_check：" + firstText(db, "PRAGMA integrity_check"))
+        lines.append("foreign_key_check 违例：\(int(db, "SELECT COUNT(*) FROM pragma_foreign_key_check") ?? -1)")
+        var orphans: Int64 = 0
+        for (table, column) in refs {
+            orphans += int(db, "SELECT COUNT(*) FROM \(table) WHERE \(column) NOT IN (SELECT Z_PK FROM ZASSET)") ?? 0
+        }
+        lines.append("级联后孤儿子行：\(orphans)")
+        lines.append("结论：改 Z_PK 需级联全部外键且删除原行；排序/文件名并不靠它（已由 ZSORTTOKEN/ZFILENAME 实现）")
+        return lines.joined(separator: "\n")
     }
 }
 
