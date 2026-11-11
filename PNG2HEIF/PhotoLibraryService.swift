@@ -296,7 +296,7 @@ final class PhotoLibraryService: ObservableObject {
         if localIdentifier == nil {
             note = "localIdentifier 缺失，按「最新一行」兜底定位，请人工核对"
         } else if !uuidMatched {
-            note = "UUID 不吻合，数据库里这一行可能不是刚建的那个资产"
+            note = "UUID 不吻合（新=\(newUUID ?? "nil")；行=\(rowUUID)；zpk=\(zpk)）"
         } else {
             note = nil
         }
@@ -309,7 +309,8 @@ final class PhotoLibraryService: ObservableObject {
                 seamlessNote = applySeamlessReplacement(source: source, zpk: zpk)
             }
             let finalRow = ScreenshotSubtype.row(zpk: zpk)
-            let combined = [note, seamlessNote].compactMap { $0 }.joined(separator: "；")
+            let combined = (["代码=\(PhotoLibraryService.compiledBuild)"] + [note, seamlessNote].compactMap { $0 })
+                .joined(separator: "；")
             publishPairing(PairingEntry(sourceName: sourceName,
                                         sourceIdentifier: source.localIdentifier,
                                         newIdentifier: localIdentifier,
@@ -318,7 +319,7 @@ final class PhotoLibraryService: ObservableObject {
                                         before: change.before,
                                         after: change.after,
                                         uuidMatched: uuidMatched,
-                                        note: combined.isEmpty ? nil : combined))
+                                        note: combined))
         case .failure(let error):
             publishPairing(PairingEntry(sourceName: sourceName,
                                         sourceIdentifier: source.localIdentifier,
@@ -347,21 +348,25 @@ final class PhotoLibraryService: ObservableObject {
         let currentPath = root + info.directory + "/" + info.filename
         let desiredPath = root + info.directory + "/" + desired
         var renamed = false
+        var renameNote = ""
         if info.filename != desired {
-            guard !FileManager.default.fileExists(atPath: desiredPath) else {
-                return "无缝替换：\(desired) 已存在，保留 Photos 命名"
-            }
-            do {
-                try FileManager.default.moveItem(atPath: currentPath, toPath: desiredPath)
-                renamed = true
-            } catch {
-                return "无缝替换：物理改名失败（\(error.localizedDescription)），保留 Photos 命名"
+            if FileManager.default.fileExists(atPath: desiredPath) {
+                renameNote = "\(desired) 已存在，保留 Photos 命名"
+            } else {
+                do {
+                    try FileManager.default.moveItem(atPath: currentPath, toPath: desiredPath)
+                    renamed = true
+                } catch {
+                    renameNote = "物理改名失败（\(error.localizedDescription)），保留 Photos 命名"
+                }
             }
         }
+        // 改名即使被跳过/失败，排序 token 仍要带，保证位置回原处
         let target = renamed ? desired : info.filename
         switch ScreenshotSubtype.applySeamless(zpk: zpk, filename: target, sortToken: sourceInfo.sortToken) {
         case .success(let after):
             return "无缝替换：文件名 \(after.filename)、排序已带原图 token"
+                + (renameNote.isEmpty ? "" : "；\(renameNote)")
         case .failure(let error):
             if renamed {
                 try? FileManager.default.moveItem(atPath: desiredPath, toPath: currentPath)
@@ -508,6 +513,10 @@ final class PhotoLibraryService: ObservableObject {
     /// 一旦确认就跳过，省掉每张图两次注定失败的编码。
     private static var imageIOHEICUnusable = false
 
+    /// 编译期烧进二进制的版本号。自检首行与对应表都打印它：磁盘 plist 会被重装换成新值，
+    /// 但运行中的旧进程仍烧着旧值，靠它识破"表头新、代码旧"的旧进程谎报。
+    static let compiledBuild = 16
+
     static func environmentReport() -> String {
         let manager = FileManager.default
         let work = resolveWorkDirectory()
@@ -548,7 +557,7 @@ final class PhotoLibraryService: ObservableObject {
         // 让每张自检截图自证身份：版本号+剥离开关就在输出第一行，
         // 不再依赖可能被通知挡住、或读盘不读进程的表头。
         let selfBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-        lines.append("自检 build \(selfBuild) · 剥离in-band=\(HEIFWriter.Variant.appleLike.stripNonVCL)")
+        lines.append("自检 build \(selfBuild) · 代码=\(PhotoLibraryService.compiledBuild) · 剥离in-band=\(HEIFWriter.Variant.appleLike.stripNonVCL)")
         let resolved = PhotoLibraryService.resolveWorkDirectory()
         lines.append("工作目录：\(resolved.url?.path ?? "无")　\(resolved.detail)")
         guard let directory = resolved.url else { return lines.joined(separator: "\n") }
