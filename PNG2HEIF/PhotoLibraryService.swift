@@ -1734,7 +1734,7 @@ enum HEIFWriter {
             }
             // 告诉 VT 这块 RGB 缓冲的色彩空间，否则它按 sRGB/BT.709 转 YUV，P3 就丢了
             CVBufferSetAttachment(pixelBuffer, kCVImageBufferCGColorSpaceKey, space,
-                                  kCVAttachmentMode_ShouldPropagate)
+                                  .shouldPropagate)
 
             let locked = CVPixelBufferLockBaseAddress(pixelBuffer, [])
             guard locked == kCVReturnSuccess else {
