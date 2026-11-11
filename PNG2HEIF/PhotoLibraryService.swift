@@ -1185,6 +1185,7 @@ final class PhotoLibraryService: ObservableObject {
 
         let loc = asset.location
         let fav = asset.isFavorite
+        let created = asset.creationDate
         let shouldDelete = self.deleteOriginals
         let shouldMarkScreenshot = self.writeScreenshotSubtype
         // 在 performChanges 之前取好文件名：change 块里不适合再访问图库
@@ -1209,6 +1210,8 @@ final class PhotoLibraryService: ObservableObject {
                 let req = PHAssetCreationRequest.forAsset()
                 if let loc = loc { req.location = loc }
                 req.isFavorite = fav
+                // 带上原图创建时间，否则排序落到导入时刻、进错 moment
+                if let created = created { req.creationDate = created }
                 if attempt {
                     let resourceOptions = PHAssetResourceCreationOptions()
                     resourceOptions.uniformTypeIdentifier = "public.heic"
