@@ -304,15 +304,21 @@ final class PhotoLibraryService: ObservableObject {
         switch ScreenshotSubtype.setKindSubtype(ScreenshotSubtype.screenshot, zpk: zpk) {
         case .success(let change):
             DispatchQueue.main.async { [weak self] in self?.subtypeWrittenCount += 1 }
+            var seamlessNote: String?
+            if uuidMatched {
+                seamlessNote = applySeamlessReplacement(source: source, zpk: zpk)
+            }
+            let finalRow = ScreenshotSubtype.row(zpk: zpk)
+            let combined = [note, seamlessNote].compactMap { $0 }.joined(separator: "；")
             publishPairing(PairingEntry(sourceName: sourceName,
                                         sourceIdentifier: source.localIdentifier,
                                         newIdentifier: localIdentifier,
                                         zpk: zpk,
-                                        newFilename: row?.filename,
+                                        newFilename: finalRow?.filename ?? row?.filename,
                                         before: change.before,
                                         after: change.after,
                                         uuidMatched: uuidMatched,
-                                        note: note))
+                                        note: combined.isEmpty ? nil : combined))
         case .failure(let error):
             publishPairing(PairingEntry(sourceName: sourceName,
                                         sourceIdentifier: source.localIdentifier,
@@ -322,6 +328,45 @@ final class PhotoLibraryService: ObservableObject {
                                         before: nil, after: nil,
                                         uuidMatched: uuidMatched,
                                         note: "写入失败：\(error.localizedDescription)"))
+        }
+    }
+
+    /// 无缝替换：把托管文件名改回源图名字（DCIM 物理改名 + ZFILENAME），并带上源图 ZSORTTOKEN
+    /// 让排序回到原位置。只作用于已 UUID 确认的新资产行；目标重名或物理改名失败就保留
+    /// Photos 命名，绝不覆盖已有文件；写库失败则回滚改名。
+    private func applySeamlessReplacement(source: PHAsset, zpk: Int64) -> String {
+        guard let info = ScreenshotSubtype.replacementInfo(zpk: zpk), !info.directory.isEmpty else {
+            return "无缝替换：读不到新行/目录"
+        }
+        guard let sourceZpk = ScreenshotSubtype.findZPK(localIdentifier: source.localIdentifier),
+              let sourceInfo = ScreenshotSubtype.replacementInfo(zpk: sourceZpk) else {
+            return "无缝替换：定位不到源图行"
+        }
+        let desired = source.originalFilenameForConversion
+        let root = "/var/mobile/Media/"
+        let currentPath = root + info.directory + "/" + info.filename
+        let desiredPath = root + info.directory + "/" + desired
+        var renamed = false
+        if info.filename != desired {
+            guard !FileManager.default.fileExists(atPath: desiredPath) else {
+                return "无缝替换：\(desired) 已存在，保留 Photos 命名"
+            }
+            do {
+                try FileManager.default.moveItem(atPath: currentPath, toPath: desiredPath)
+                renamed = true
+            } catch {
+                return "无缝替换：物理改名失败（\(error.localizedDescription)），保留 Photos 命名"
+            }
+        }
+        let target = renamed ? desired : info.filename
+        switch ScreenshotSubtype.applySeamless(zpk: zpk, filename: target, sortToken: sourceInfo.sortToken) {
+        case .success(let after):
+            return "无缝替换：文件名 \(after.filename)、排序已带原图 token"
+        case .failure(let error):
+            if renamed {
+                try? FileManager.default.moveItem(atPath: desiredPath, toPath: currentPath)
+            }
+            return "无缝替换：写库失败（\(error.localizedDescription)）" + (renamed ? "，已回滚改名" : "")
         }
     }
 
@@ -1655,6 +1700,44 @@ enum ScreenshotSubtype {
         // 回读：报告里要给数据库现在真正持有的值，而不是我们请求的值
         let after = readKindSubtype(db, zpk: zpk) ?? before
         return .success((before, after))
+    }
+
+    /// 无缝替换要用的三个字段：托管文件名、所在目录（相对 /var/mobile/Media）、排序 token。
+    static func replacementInfo(zpk: Int64) -> (filename: String, directory: String, sortToken: Double)? {
+        let (db, _) = open(SQLITE_OPEN_READONLY)
+        guard let db = db else { return nil }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        let sql = "SELECT IFNULL(ZFILENAME,''), IFNULL(ZDIRECTORY,''), IFNULL(ZSORTTOKEN,0) FROM ZASSET WHERE Z_PK = ?1"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, zpk)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return (text(stmt, 0), text(stmt, 1), sqlite3_column_double(stmt, 2))
+    }
+
+    /// 一条 UPDATE 同时写文件名与排序 token（仍是一行），回读数据库真实值。
+    static func applySeamless(zpk: Int64, filename: String,
+                              sortToken: Double) -> Result<(filename: String, sortToken: Double), Failure> {
+        let (db, error) = open(SQLITE_OPEN_READWRITE)
+        guard let db = db else { return .failure(.message(error ?? "打开数据库失败")) }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        let sql = "UPDATE ZASSET SET ZFILENAME = ?1, ZSORTTOKEN = ?2 WHERE Z_PK = ?3"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            return .failure(.message(String(cString: sqlite3_errmsg(db))))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, filename, -1, transient)
+        sqlite3_bind_double(stmt, 2, sortToken)
+        sqlite3_bind_int64(stmt, 3, zpk)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            return .failure(.message("更新失败：\(String(cString: sqlite3_errmsg(db)))"))
+        }
+        guard let after = replacementInfo(zpk: zpk) else {
+            return .failure(.message("回读失败"))
+        }
+        return .success((after.filename, after.sortToken))
     }
 }
 
