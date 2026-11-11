@@ -527,7 +527,7 @@ final class PhotoLibraryService: ObservableObject {
 
     /// 编译期烧进二进制的版本号。自检首行与对应表都打印它：磁盘 plist 会被重装换成新值，
     /// 但运行中的旧进程仍烧着旧值，靠它识破"表头新、代码旧"的旧进程谎报。
-    static let compiledBuild = 19
+    static let compiledBuild = 20
 
     static func environmentReport() -> String {
         let manager = FileManager.default
@@ -1840,11 +1840,15 @@ enum IndexExperiment {
             _ = exec(db, "DELETE FROM \(table) WHERE \(column)=\(oldPK)")
             _ = exec(db, "UPDATE \(table) SET \(column)=\(oldPK) WHERE \(column)=\(newPK)")
         }
-        let moved = exec(db, "DELETE FROM ZASSET WHERE Z_PK=\(oldPK)")
-            && exec(db, "UPDATE ZASSET SET Z_PK=\(oldPK) WHERE Z_PK=\(newPK)")
-        guard moved, exec(db, "COMMIT") else {
+        let delOld = exec(db, "DELETE FROM ZASSET WHERE Z_PK=\(oldPK)")
+        let errDel = delOld ? "" : String(cString: sqlite3_errmsg(db))
+        let updNew = exec(db, "UPDATE ZASSET SET Z_PK=\(oldPK) WHERE Z_PK=\(newPK)")
+        let errUpd = updNew ? "" : String(cString: sqlite3_errmsg(db))
+        let committed = delOld && updNew && exec(db, "COMMIT")
+        let errCommit = committed ? "" : String(cString: sqlite3_errmsg(db))
+        guard committed else {
             _ = exec(db, "ROLLBACK")
-            return "索引实验：副本上移动 Z_PK 失败（已回滚副本）"
+            return "索引实验：移动 Z_PK 失败（已回滚副本）删原行=\(delOld)[\(errDel)] 改PK=\(updNew)[\(errUpd)] 提交[\(errCommit)]"
         }
 
         var lines: [String] = ["索引实验（仅副本，真库未动）：HEIC \(newPK) → PNG 的 \(oldPK)，级联 \(refs.count) 个外键列"]
