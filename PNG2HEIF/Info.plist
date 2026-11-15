@@ -13,7 +13,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>20</string>
+	<string>21</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSPhotoLibraryAddUsageDescription</key>
@@ -28,5 +28,20 @@
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>PNG2HEIF</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.example.PNG2HEIF</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>png2heif</string>
+			</array>
+		</dict>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.example.PNG2HEIF.autoconvert</string>
+	</array>
 </dict>
 </plist>

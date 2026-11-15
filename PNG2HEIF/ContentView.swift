@@ -76,7 +76,7 @@ struct FolderPicker: UIViewControllerRepresentable {
 // MARK: - ContentView
 
 struct ContentView: View {
-    @StateObject private var service = PhotoLibraryService()
+    @StateObject private var service = PhotoLibraryService.shared
     @AppStorage("deleteOriginals") private var deleteOriginals = false
     @AppStorage("writeScreenshotSubtype") private var writeScreenshotSubtype = false
     @State private var showFolderPicker = false
@@ -349,6 +349,14 @@ struct ContentView: View {
                         }
                         .tint(.red)
                     }
+
+                    Button {
+                        _ = service.convertNewScreenshots(trigger: "手动")
+                    } label: {
+                        Label("转换新截图（自动入口）", systemImage: "camera.viewfinder")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .disabled(service.isWorking)
                 }
 
                 // MARK: - 进度

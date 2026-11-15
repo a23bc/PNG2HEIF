@@ -147,6 +147,11 @@ final class ConversionDB {
 // MARK: - PhotoLibraryService
 
 final class PhotoLibraryService: ObservableObject {
+    /// 共享实例：UI、URL scheme、BGTask 共用同一个，后台转换的状态也能回显到界面。
+    static let shared = PhotoLibraryService()
+
+    /// 一轮转换结束时的回调（BGTask 用它 setTaskCompleted）；触发一次后清空。
+    var onConversionFinished: (() -> Void)?
     // MARK: - Published State
 
     @Published var pngCount = 0
@@ -527,7 +532,7 @@ final class PhotoLibraryService: ObservableObject {
 
     /// 编译期烧进二进制的版本号。自检首行与对应表都打印它：磁盘 plist 会被重装换成新值，
     /// 但运行中的旧进程仍烧着旧值，靠它识破"表头新、代码旧"的旧进程谎报。
-    static let compiledBuild = 20
+    static let compiledBuild = 21
 
     static func environmentReport() -> String {
         let manager = FileManager.default
@@ -828,7 +833,34 @@ final class PhotoLibraryService: ObservableObject {
         beginConversion(with: ordered, scope: "仅选中的 \(ordered.count) 张")
     }
 
-    private func beginConversion(with work: [PHAsset], scope: String) {
+    /// 自动转换入口：找出"尚未转换过的系统截图"并导入照片库（强制 library 模式）。
+    /// 供 UI 按钮、URL scheme（快捷指令）、BGTask 兜底共用；去重用 ConversionDB 的已转记录。
+    func convertNewScreenshots(trigger: String) -> Bool {
+        guard !isWorking else {
+            status = "自动（\(trigger)）：正忙，跳过本次"
+            return false
+        }
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "(mediaSubtype & %d) != 0",
+                                        Int(PHAssetMediaSubtype.photoScreenshot.rawValue))
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
+        let fetched = PHAsset.fetchAssets(with: options)
+        let db = ConversionDB.shared
+        var todo: [PHAsset] = []
+        fetched.enumerateObjects { asset, _, _ in
+            if !db.contains(asset.localIdentifier) { todo.append(asset) }
+        }
+        guard !todo.isEmpty else {
+            status = "自动（\(trigger)）：没有待转换的新截图"
+            return false
+        }
+        beginConversion(with: todo, scope: "自动新截图 \(todo.count) 张（\(trigger)）",
+                        overrideMode: .library)
+        return true
+    }
+
+    private func beginConversion(with work: [PHAsset], scope: String,
+                                 overrideMode: ExportMode? = nil) {
         guard !isWorking, !work.isEmpty else { return }
 
         if exportMode == .folder, exportFolderURL == nil {
@@ -844,7 +876,7 @@ final class PhotoLibraryService: ObservableObject {
             return
         }
 
-        let mode = exportMode
+        let mode = overrideMode ?? exportMode
         let albumID = selectedAlbumID
         let albumName = newAlbumName.trimmingCharacters(in: .whitespaces)
         let folderURL = exportFolderURL
@@ -1423,6 +1455,8 @@ final class PhotoLibraryService: ObservableObject {
             let hasFailures = !self.failedItems.isEmpty
             self.isWorking = false
             self.shouldStop = false
+            self.onConversionFinished?()
+            self.onConversionFinished = nil
             self.status = message
             self.historyCount = ConversionDB.shared.count()
             // 转换结束后重新扫描，刷新待转换列表
