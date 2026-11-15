@@ -532,7 +532,7 @@ final class PhotoLibraryService: ObservableObject {
 
     /// 编译期烧进二进制的版本号。自检首行与对应表都打印它：磁盘 plist 会被重装换成新值，
     /// 但运行中的旧进程仍烧着旧值，靠它识破"表头新、代码旧"的旧进程谎报。
-    static let compiledBuild = 21
+    static let compiledBuild = 22
 
     static func environmentReport() -> String {
         let manager = FileManager.default
@@ -845,18 +845,41 @@ final class PhotoLibraryService: ObservableObject {
                                         Int(PHAssetMediaSubtype.photoScreenshot.rawValue))
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         let fetched = PHAsset.fetchAssets(with: options)
-        let db = ConversionDB.shared
-        var todo: [PHAsset] = []
-        fetched.enumerateObjects { asset, _, _ in
-            if !db.contains(asset.localIdentifier) { todo.append(asset) }
+        var all: [PHAsset] = []
+        fetched.enumerateObjects { asset, _, _ in all.append(asset) }
+        let newest = all.last?.creationDate ?? Date()
+
+        // 水位线：只转"基线之后新增"的截图，避免把全部历史截图 bulk 过一遍。
+        // 首次运行只建立基线（=当前最新截图时间），不转历史。
+        let defaults = UserDefaults.standard
+        let key = "autoConvertWatermark"
+        guard let watermark = defaults.object(forKey: key) as? Date else {
+            defaults.set(newest, forKey: key)
+            status = "自动（\(trigger)）：已建立基线，仅转换此后新增的 PNG 截图"
+            return false
         }
+        let db = ConversionDB.shared
+        let todo = all.filter { asset in
+            (asset.creationDate ?? .distantPast) > watermark
+                && !db.contains(asset.localIdentifier)
+                && Self.isPNG(asset)
+        }
+        defaults.set(newest, forKey: key)
         guard !todo.isEmpty else {
-            status = "自动（\(trigger)）：没有待转换的新截图"
+            status = "自动（\(trigger)）：没有待转换的新 PNG 截图"
             return false
         }
         beginConversion(with: todo, scope: "自动新截图 \(todo.count) 张（\(trigger)）",
                         overrideMode: .library)
         return true
+    }
+
+    /// 自动转换只处理 PNG 源（与手动扫描同一 population）；已是 HEIC 的跳过。
+    private static func isPNG(_ asset: PHAsset) -> Bool {
+        guard let resource = PHAssetResource.assetResources(for: asset)
+            .first(where: { $0.type == .photo }) else { return false }
+        return resource.uniformTypeIdentifier == "public.png"
+            || resource.originalFilename.lowercased().hasSuffix(".png")
     }
 
     private func beginConversion(with work: [PHAsset], scope: String,
