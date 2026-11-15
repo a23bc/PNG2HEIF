@@ -75,6 +75,8 @@ struct FolderPicker: UIViewControllerRepresentable {
 
 // MARK: - ContentView
 
+/// 三个标签页：转换 / 数据库 / 诊断。把原来堆在一个 Form 里的十来个 Section 按职责分开，
+/// 每页只保留相关控件；所有绑定与动作不变。
 struct ContentView: View {
     @StateObject private var service = PhotoLibraryService.shared
     @AppStorage("deleteOriginals") private var deleteOriginals = false
@@ -133,410 +135,300 @@ struct ContentView: View {
     }
 
     var body: some View {
+        TabView {
+            convertTab
+                .tabItem { Label("转换", systemImage: "arrow.triangle.2.circlepath") }
+            databaseTab
+                .tabItem { Label("数据库", systemImage: "tablecells") }
+            diagnosticsTab
+                .tabItem { Label("诊断", systemImage: "waveform.path.ecg") }
+        }
+        .onAppear {
+            service.deleteOriginals = deleteOriginals
+            service.writeScreenshotSubtype = writeScreenshotSubtype
+            service.requestAuthorizationAndScan()
+            service.refreshSubtypePanel()
+        }
+        .alert(item: $service.alert) { item in
+            Alert(
+                title: Text(item.title),
+                message: Text(item.message),
+                dismissButton: .default(Text("好"))
+            )
+        }
+        .alert("确认清除", isPresented: $showClearConfirm) {
+            Button("取消", role: .cancel) {}
+            Button("清除", role: .destructive) { service.clearHistory() }
+        } message: {
+            Text("将清除所有转换记录，下次扫描会重新发现所有 PNG 截图。已转换的文件不会被撤回。")
+        }
+        .sheet(isPresented: $showFolderPicker) {
+            FolderPicker { url in
+                service.exportFolderURL = url
+                service.exportFolderName = url.lastPathComponent
+            }
+        }
+        .sheet(isPresented: $showPhotoPicker) {
+            PhotoPicker { identifiers in
+                service.setSelection(identifiers)
+            }
+        }
+    }
+
+    // MARK: - Tab 1: 转换
+
+    private var convertTab: some View {
         NavigationView {
             Form {
-                // MARK: - 扫描结果
                 Section {
-                    HStack {
-                        Text("待转换 PNG")
-                        Spacer()
-                        Text("\(service.pngCount) 张")
-                            .foregroundColor(.secondary)
-                            .monospacedDigit()
-                    }
+                    statRow("待转换 PNG", "\(service.pngCount) 张", .secondary)
                     if service.skippedCount > 0 {
-                        HStack {
-                            Text("已跳过（历史记录）")
-                            Spacer()
-                            Text("\(service.skippedCount) 张")
-                                .foregroundColor(.orange)
-                                .monospacedDigit()
-                        }
+                        statRow("已跳过（历史）", "\(service.skippedCount) 张", .orange)
                     }
                     if service.historyCount > 0 {
-                        HStack {
-                            Text("累计已转换")
-                            Spacer()
-                            Text("\(service.historyCount) 张")
-                                .foregroundColor(.green)
-                                .monospacedDigit()
-                        }
+                        statRow("累计已转换", "\(service.historyCount) 张", .green)
                     }
                     if service.totalSizeSaved > 0 {
-                        HStack {
-                            Text("已节省空间")
-                            Spacer()
-                            Text(service.savedSizeText)
-                                .foregroundColor(.green)
-                                .fontWeight(.medium)
-                        }
+                        statRow("已节省空间", service.savedSizeText, .green)
                     }
                 } header: {
-                    Text("照片图库")
+                    Text("概览")
                 } footer: {
                     if service.historyCount > 0 {
-                        Button("清除转换记录（重新扫描全部 PNG）") {
-                            showClearConfirm = true
-                        }
-                        .foregroundColor(.red)
-                        .font(.footnote)
-                    }
-                }
-                .alert("确认清除", isPresented: $showClearConfirm) {
-                    Button("取消", role: .cancel) {}
-                    Button("清除", role: .destructive) {
-                        service.clearHistory()
-                    }
-                } message: {
-                    Text("将清除所有转换记录，下次扫描会重新发现所有 PNG 截图。已转换的文件不会被撤回。")
-                }
-
-                // MARK: - 导出位置
-                Section {
-                    Picker("导出到", selection: $service.exportMode) {
-                        ForEach(ExportMode.allCases) { mode in
-                            Label(mode.label, systemImage: mode.icon).tag(mode)
-                        }
-                    }
-                    .onChange(of: service.exportMode) { _ in
-                        if service.exportMode != .folder {
-                            service.exportFolderURL = nil
-                            service.exportFolderName = nil
-                        }
-                    }
-
-                    if service.exportMode == .album {
-                        if service.userAlbums.isEmpty {
-                            Text("没有用户相簿")
-                                .foregroundColor(.secondary)
-                                .font(.subheadline)
-                        } else {
-                            Picker("选择相簿", selection: $service.selectedAlbumID) {
-                                Text("请选择").tag(String?.none)
-                                ForEach(service.userAlbums) { album in
-                                    HStack {
-                                        Text(album.title)
-                                        Spacer()
-                                        Text("\(album.count) 张")
-                                            .foregroundColor(.secondary)
-                                        Text(Image(systemName: "chevron.right"))
-                                            .foregroundColor(.secondary)
-                                    }
-                                    .tag(Optional(album.id))
-                                }
-                            }
-                        }
-                    }
-
-                    if service.exportMode == .newAlbum {
-                        TextField("相簿名称", text: $service.newAlbumName)
-                            .autocapitalization(.none)
-                            .disableAutocorrection(true)
-                            .onSubmit { hideKeyboard() }
-                            .toolbar {
-                                ToolbarItemGroup(placement: .keyboard) {
-                                    Spacer()
-                                    Button("完成") { hideKeyboard() }
-                                }
-                            }
-                    }
-
-                    if service.exportMode == .folder {
-                        Button {
-                            showFolderPicker = true
-                        } label: {
-                            HStack {
-                                Label("选择文件夹", systemImage: "folder.badge.plus")
-                                Spacer()
-                                if let name = service.exportFolderName {
-                                    Text(name)
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
-                                    Text(Image(systemName: "chevron.right"))
-                                        .foregroundColor(.secondary)
-                                } else {
-                                    Text("未选择")
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        }
-
-                        if let name = service.exportFolderName {
-                            Text("HEIF 文件将保存到：\(name)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                } header: {
-                    Text("导出位置")
-                } footer: {
-                    switch service.exportMode {
-                    case .library:
-                        Text("直接保存到照片图库，不放入任何相簿")
-                    case .album:
-                        Text("保存到已有相簿中")
-                    case .newAlbum:
-                        Text("自动创建新相簿并保存")
-                    case .folder:
-                        Text("导出为 HEIF 文件到「文件」App 中的指定文件夹，不经过照片图库")
+                        Button("清除转换记录") { showClearConfirm = true }
+                            .font(.footnote)
+                            .foregroundColor(.red)
                     }
                 }
 
-                // MARK: - 转换选项
-                Section {
-                    Toggle("转换成功后删除 PNG", isOn: $deleteOriginals)
-                        .onChange(of: deleteOriginals) { newValue in
-                            service.deleteOriginals = newValue
-                        }
-
-                    Toggle("转换后写入截图标记（ZKINDSUBTYPE=10）", isOn: $writeScreenshotSubtype)
-                        .onChange(of: writeScreenshotSubtype) { newValue in
-                            service.writeScreenshotSubtype = newValue
-                        }
-
-                    if #available(iOS 15, *) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("压缩质量")
-                                Spacer()
-                                Text("\(Int(service.compressionQuality * 100))%")
-                                    .foregroundColor(.secondary)
-                                    .monospacedDigit()
-                            }
-                            HStack {
-                                Text("更小")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                                Slider(value: $service.compressionQuality, in: 0.5...1.0, step: 0.01)
-                                Text("更清晰")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                            Text("0.82 接近 iOS 原生转换效果，截图推荐 0.75-0.85")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                } header: {
-                    Text("选项")
-                }
-
-                // MARK: - 操作按钮
                 Section {
                     Button {
                         service.scan()
                     } label: {
                         Label("扫描图库", systemImage: "magnifyingglass")
-                            .frame(maxWidth: .infinity)
                     }
                     .disabled(service.isWorking)
 
-                    if !service.isWorking {
-                        Button {
-                            service.startConversion()
-                        } label: {
-                            Label("开始转换", systemImage: "arrow.triangle.2.circlepath")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .disabled(service.pngCount == 0)
-                        .tint(.blue)
-                    } else {
+                    if service.isWorking {
                         Button(role: .destructive) {
                             service.stopConversion()
                         } label: {
                             Label("停止转换", systemImage: "stop.circle.fill")
-                                .frame(maxWidth: .infinity)
                         }
                         .tint(.red)
-                    }
-
-                    Button {
-                        _ = service.convertNewScreenshots(trigger: "手动")
-                    } label: {
-                        Label("转换新截图（自动入口）", systemImage: "camera.viewfinder")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .disabled(service.isWorking)
-                }
-
-                // MARK: - 进度
-                if service.isWorking {
-                    Section {
-                        VStack(spacing: 8) {
-                            ProgressView(value: service.progress)
-                                .tint(.blue)
-                            HStack {
-                                Text("\(service.processed) / \(service.total)")
-                                    .font(.subheadline)
-                                    .monospacedDigit()
-                                Spacer()
-                                Text("\(Int(service.progress * 100))%")
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
-                                    .monospacedDigit()
-                                    .foregroundColor(.blue)
-                            }
-                            if service.totalSizeSaved > 0 {
-                                Text("已节省 \(service.savedSizeText)")
-                                    .font(.caption)
-                                    .foregroundColor(.green)
-                            }
-                        }
-                    } header: {
-                        Text(service.conversionScope.isEmpty
-                             ? "处理进度"
-                             : "处理进度（\(service.conversionScope)）")
-                    }
-                }
-
-                // MARK: - 失败列表
-                if !service.failedItems.isEmpty && !service.isWorking {
-                    Section {
-                        ForEach(service.failedItems) { item in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                        .foregroundColor(.red)
-                                        .font(.caption)
-                                    Text(item.fileName)
-                                        .font(.subheadline)
-                                        .lineLimit(1)
-                                    Spacer()
-                                }
-                                Text(item.error)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.vertical, 2)
-                        }
-                    } header: {
+                        ProgressView(value: service.progress)
                         HStack {
-                            Text("失败列表")
+                            Text("\(service.processed) / \(service.total)")
+                                .monospacedDigit()
                             Spacer()
-                            Text("\(service.failedItems.count) 张")
-                                .foregroundColor(.red)
-                                .fontWeight(.medium)
+                            Text(service.conversionScope)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
                         }
-                    } footer: {
-                        Text("这些图片转换失败，可能是因为文件损坏或 iCloud 下载超时。重新扫描后可再次尝试转换。")
+                        .font(.caption)
+                    } else {
+                        Button {
+                            service.startConversion()
+                        } label: {
+                            Label("开始转换", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .disabled(service.pngCount == 0)
+                        .tint(.blue)
+
+                        Button {
+                            _ = service.convertNewScreenshots(trigger: "手动")
+                        } label: {
+                            Label("转换新截图（自动入口）", systemImage: "camera.viewfinder")
+                        }
                     }
+                } header: {
+                    Text("操作")
                 }
 
-                // MARK: - 自选转换
                 Section {
                     Button {
                         showPhotoPicker = true
                     } label: {
                         Label("在图库里选择照片", systemImage: "photo.on.rectangle.angled")
                     }
-
-                    HStack {
-                        Text("已选")
-                        Spacer()
-                        Text("\(service.selectedLocalIdentifiers.count) 张")
-                            .foregroundColor(.secondary)
-                            .monospacedDigit()
-                    }
-
-                    if !service.lastPickerReport.isEmpty {
-                        Text(service.lastPickerReport)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .lineLimit(3)
-                    }
-
+                    statRow("已选", "\(service.selectedLocalIdentifiers.count) 张", .secondary)
                     if !service.selectedLocalIdentifiers.isEmpty {
                         Button {
                             service.convertSelected()
                         } label: {
                             Label("只转换选中的 \(service.selectedLocalIdentifiers.count) 张",
                                   systemImage: "arrow.triangle.2.circlepath")
-                                .frame(maxWidth: .infinity)
                         }
                         .disabled(service.isWorking
                                   || (service.exportMode == .folder && service.exportFolderURL == nil))
                         .tint(.blue)
-
-                        Button("清空选择") {
-                            service.setSelection([])
-                        }
-                        .font(.footnote)
-                        .foregroundColor(.red)
+                        Button("清空选择") { service.setSelection([]) }
+                            .font(.footnote)
+                            .foregroundColor(.red)
+                    }
+                    if !service.lastPickerReport.isEmpty {
+                        Text(service.lastPickerReport)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
                     }
                 } header: {
                     Text("自选转换")
-                } footer: {
-                    Text("用系统选择器在应用内挑图，只转换选中的这些，不走「扫描全部 PNG」。选中项按 localIdentifier 记住；转换后会拿「新建资产的 localIdentifier」反查 Photos.sqlite，把写入的那一行和源图对应起来 —— 对应关系与 UUID 是否吻合会显示在下面的表里。")
                 }
 
-                // MARK: - 截图标记（ZASSET.ZKINDSUBTYPE）
+                exportSection
+                optionsSection
+
+                if !service.failedItems.isEmpty && !service.isWorking {
+                    Section {
+                        ForEach(service.failedItems) { item in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.fileName)
+                                    .font(.subheadline)
+                                    .lineLimit(1)
+                                Text(item.error)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    } header: {
+                        HStack {
+                            Text("失败列表")
+                            Spacer()
+                            Text("\(service.failedItems.count) 张").foregroundColor(.red)
+                        }
+                    }
+                }
+
+                Section {
+                    Text(service.status)
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                } header: {
+                    Text("状态")
+                }
+            }
+            .navigationTitle("PNG → HEIF")
+        }
+        .navigationViewStyle(.stack)
+    }
+
+    private func statRow(_ title: String, _ value: String, _ color: Color) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(value)
+                .foregroundColor(color)
+                .monospacedDigit()
+        }
+    }
+
+    private var exportSection: some View {
+        Section {
+            Picker("导出到", selection: $service.exportMode) {
+                ForEach(ExportMode.allCases) { mode in
+                    Label(mode.label, systemImage: mode.icon).tag(mode)
+                }
+            }
+            .onChange(of: service.exportMode) { _ in
+                if service.exportMode != .folder {
+                    service.exportFolderURL = nil
+                    service.exportFolderName = nil
+                }
+            }
+            if service.exportMode == .album {
+                if service.userAlbums.isEmpty {
+                    Text("没有用户相簿").foregroundColor(.secondary).font(.subheadline)
+                } else {
+                    Picker("选择相簿", selection: $service.selectedAlbumID) {
+                        Text("请选择").tag(String?.none)
+                        ForEach(service.userAlbums) { album in
+                            Text("\(album.title)（\(album.count)）").tag(Optional(album.id))
+                        }
+                    }
+                }
+            }
+            if service.exportMode == .newAlbum {
+                TextField("相簿名称", text: $service.newAlbumName)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .onSubmit { hideKeyboard() }
+            }
+            if service.exportMode == .folder {
+                Button {
+                    showFolderPicker = true
+                } label: {
+                    HStack {
+                        Label("选择文件夹", systemImage: "folder.badge.plus")
+                        Spacer()
+                        Text(service.exportFolderName ?? "未选择")
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+        } header: {
+            Text("导出位置")
+        }
+    }
+
+    private var optionsSection: some View {
+        Section {
+            Toggle("转换后删除原 PNG", isOn: $deleteOriginals)
+                .onChange(of: deleteOriginals) { service.deleteOriginals = $0 }
+            Toggle("写入截图标记 + 无缝替换", isOn: $writeScreenshotSubtype)
+                .onChange(of: writeScreenshotSubtype) { service.writeScreenshotSubtype = $0 }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("压缩质量")
+                    Spacer()
+                    Text("\(Int(service.compressionQuality * 100))%")
+                        .foregroundColor(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(value: $service.compressionQuality, in: 0.5...1.0, step: 0.01)
+            }
+        } header: {
+            Text("选项")
+        } footer: {
+            Text("截图标记=ZKINDSUBTYPE 10；无缝替换=同名+同排序+原时间+P3。质量 0.75–0.85 适合截图。")
+        }
+    }
+
+    // MARK: - Tab 2: 数据库
+
+    private var databaseTab: some View {
+        NavigationView {
+            Form {
                 Section {
                     Text(service.subtypeProbe)
                         .font(.caption2)
                         .foregroundColor(.secondary)
-
-                    if !service.environmentProbe.isEmpty {
-                        Text(service.environmentProbe)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-
-                    /* 不给文本"可选中"：长按会拉起系统编辑菜单，而在这台机器上那条路径会崩
-                       （PhotosDatabaseInspector 里定位过的 CoreImage/CI::GLContext 崩溃，栈里只有 main）。
-                       要复制就给按钮，直接写剪贴板，不经过任何菜单界面。 */
-                    Button {
-                        UIPasteboard.general.string = diagnosticsText()
-                        copyNote = "已复制到剪贴板"
-                    } label: {
-                        Label("复制以上信息", systemImage: "doc.on.doc")
-                    }
-
-                    if let copyNote = copyNote {
-                        Text(copyNote)
-                            .font(.caption2)
-                            .foregroundColor(.green)
-                    }
-
                     Button {
                         service.refreshSubtypePanel()
                     } label: {
                         Label("刷新数据库状态", systemImage: "arrow.clockwise")
                     }
-
-                    Button {
-                        service.runCodecSelfTest()
-                    } label: {
-                        Label("编码自检（PNG / JPEG / HEIC）", systemImage: "waveform.path.ecg")
-                    }
-
-                    if !service.codecProbe.isEmpty {
-                        Text(service.codecProbe)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-
                     if let last = service.subtypeLastResult {
                         Text(last)
                             .font(.caption)
                             .foregroundColor(.green)
                     }
+                } header: {
+                    Text("截图标记（ZKINDSUBTYPE）")
+                } footer: {
+                    Text("10=截图，0=普通照片。respring 后点刷新看是否被系统写回。")
+                }
 
-                    if !service.subtypeRows.isEmpty {
+                if !service.subtypeRows.isEmpty {
+                    Section {
                         ForEach(service.subtypeRows) { row in
-                            VStack(alignment: .leading, spacing: 4) {
+                            VStack(alignment: .leading, spacing: 3) {
                                 HStack(spacing: 8) {
                                     Text(row.isScreenshot ? "截图" : "照片")
                                         .font(.caption2)
                                         .foregroundColor(row.isScreenshot ? .green : .secondary)
-                                    Text("kind=\(row.kindSubtype)")
-                                        .font(.caption2)
-                                        .monospacedDigit()
-                                        .foregroundColor(.secondary)
-                                    Text("cloud=\(row.cloudKindSubtype)")
-                                        .font(.caption2)
-                                        .monospacedDigit()
-                                        .foregroundColor(.secondary)
-                                    Text("Z_PK=\(row.zpk)")
+                                    Text("kind=\(row.kindSubtype) cloud=\(row.cloudKindSubtype) Z_PK=\(row.zpk)")
                                         .font(.caption2)
                                         .monospacedDigit()
                                         .foregroundColor(.secondary)
@@ -556,20 +448,16 @@ struct ContentView: View {
                                         .foregroundColor(.red)
                                 }
                             }
-                            .padding(.vertical, 2)
                         }
+                    } header: {
+                        Text("最近行")
                     }
-                } header: {
-                    Text("截图标记（数据库）")
-                } footer: {
-                    Text("Photos 的公开 API 不能设置截图类型，所以这里直接写 Photos.sqlite 的 ZASSET.ZKINDSUBTYPE：10 = 截图，0 = 普通照片。开关打开时，每张转换成功的资产会立刻写成 10。respring 或重启 Photos 之后点上面的刷新，看值有没有被系统写回。")
                 }
 
-                // MARK: - 源图 ↔ 新资产（对应表）
                 if !service.pairingLog.isEmpty {
                     Section {
                         ForEach(service.pairingLog) { entry in
-                            VStack(alignment: .leading, spacing: 3) {
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text(entry.sourceName)
                                     .font(.caption)
                                     .lineLimit(1)
@@ -578,51 +466,73 @@ struct ContentView: View {
                                     .foregroundColor(entry.note == nil ? .secondary : .orange)
                                     .lineLimit(2)
                             }
-                            .padding(.vertical, 2)
                         }
                     } header: {
-                        Text("源图 ↔ 新资产（对应表）")
+                        Text("源图 ↔ 新资产")
                     } footer: {
-                        Text("每转换一张就记一条。UUID 吻合说明本地定位到的数据库行就是刚建的那个资产；不吻合或走了兜底定位的会标橙，先人工核对再相信写入结果。")
+                        Text("UUID 不吻合或走兜底定位的标橙，先人工核对再相信写入结果。")
                     }
                 }
+            }
+            .navigationTitle("数据库")
+        }
+        .navigationViewStyle(.stack)
+    }
 
-                // MARK: - 状态
+    // MARK: - Tab 3: 诊断
+
+    private var diagnosticsTab: some View {
+        NavigationView {
+            Form {
                 Section {
-                    Text(service.status)
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
-                        .lineLimit(3)
+                    Button {
+                        service.refreshSubtypePanel()
+                    } label: {
+                        Label("刷新环境信息", systemImage: "arrow.clockwise")
+                    }
+                    if !service.environmentProbe.isEmpty {
+                        Text(service.environmentProbe)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 } header: {
-                    Text("状态")
+                    Text("运行环境")
+                }
+
+                Section {
+                    Button {
+                        service.runCodecSelfTest()
+                    } label: {
+                        Label("编码自检（PNG / JPEG / HEIC）", systemImage: "waveform.path.ecg")
+                    }
+                    if !service.codecProbe.isEmpty {
+                        Text(service.codecProbe)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                } header: {
+                    Text("编码自检")
+                }
+
+                Section {
+                    Button {
+                        UIPasteboard.general.string = diagnosticsText()
+                        copyNote = "已复制到剪贴板"
+                    } label: {
+                        Label("复制全部诊断信息", systemImage: "doc.on.doc")
+                    }
+                    if let copyNote = copyNote {
+                        Text(copyNote)
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                    }
+                } header: {
+                    Text("导出诊断")
+                } footer: {
+                    Text("把环境/自检/最近行/对应表攒成一段文本，便于反馈问题。")
                 }
             }
-            .navigationTitle("PNG \u{2192} HEIF")
-            .onAppear {
-                service.deleteOriginals = deleteOriginals
-                service.writeScreenshotSubtype = writeScreenshotSubtype
-                service.requestAuthorizationAndScan()
-                service.refreshSubtypePanel()
-            }
-            .alert(item: $service.alert) { item in
-                Alert(
-                    title: Text(item.title),
-                    message: Text(item.message),
-                    dismissButton: .default(Text("好"))
-                )
-            }
-            .sheet(isPresented: $showFolderPicker) {
-                FolderPicker { url in
-                    service.exportFolderURL = url
-                    service.exportFolderName = url.lastPathComponent
-                    // security-scoped 权限已在 Coordinator 中启动，此处不再重复调用
-                }
-            }
-            .sheet(isPresented: $showPhotoPicker) {
-                PhotoPicker { identifiers in
-                    service.setSelection(identifiers)
-                }
-            }
+            .navigationTitle("诊断")
         }
         .navigationViewStyle(.stack)
     }

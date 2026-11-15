@@ -532,7 +532,7 @@ final class PhotoLibraryService: ObservableObject {
 
     /// 编译期烧进二进制的版本号。自检首行与对应表都打印它：磁盘 plist 会被重装换成新值，
     /// 但运行中的旧进程仍烧着旧值，靠它识破"表头新、代码旧"的旧进程谎报。
-    static let compiledBuild = 22
+    static let compiledBuild = 23
 
     static func environmentReport() -> String {
         let manager = FileManager.default
